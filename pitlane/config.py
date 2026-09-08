@@ -1,0 +1,132 @@
+"""Run configuration: paths, secrets, and the layout of a run's artifacts.
+
+Everything the user controls lives in env files (`~/.bench.env` for secrets,
+`common.env` for the rest). Nothing here reaches out to the network or the
+filesystem beyond reading those files -- so `pitlane preflight` can validate a
+config without touching the GPU.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shlex
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+_EXPORT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """Parse a shell-style env file into a dict.
+
+    Deliberately not `source`: the env files are read by both this tool and by
+    a human pasting the runbooks into a shell, so they must stay valid shell,
+    but running them would execute whatever else is in the file.
+    """
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _EXPORT.match(line)
+        if not match:
+            continue
+        name, raw = match.group(1), match.group(2).strip()
+        # `: "${FOO:?...}"` style guards parse as junk; skip anything that is
+        # not a plain assignment.
+        if raw.startswith(("?", "!")):
+            continue
+        try:
+            parts = shlex.split(raw, comments=True)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        values[name] = os.path.expandvars(parts[0])
+    return values
+
+
+class ConfigError(RuntimeError):
+    """Raised for a config that cannot produce a valid run."""
+
+
+@dataclass(frozen=True)
+class Paths:
+    bench_root: Path
+    trace_dir: Path
+    lmcache_l2_dir: Path
+    tavily_cache_dir: Path
+    vllm_log_dir: Path
+    workflow_repo: Path
+    vllm_repos: dict[str, Path]
+
+
+@dataclass
+class Config:
+    env: dict[str, str]
+    paths: Paths
+    model_name: str
+    trace_path: Path
+    gpu: int = 0
+    min_free_ram_gb: float = 260.0
+    server_ready_timeout_s: float = 1800.0
+    port: int = 8000
+    lmcache_port: int = 10903
+    redis_url: str = "redis://127.0.0.1:6379/0"
+
+    # Resolved at run time, not from the env file.
+    run_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+    @classmethod
+    def load(cls, env_files: list[Path], overrides: dict[str, str] | None = None) -> "Config":
+        env: dict[str, str] = {}
+        for path in env_files:
+            env.update(load_env_file(path))
+        # A real environment variable wins over the files, so a one-off run can
+        # be steered without editing them.
+        env.update({k: v for k, v in os.environ.items() if k in env})
+        env.update(overrides or {})
+
+        def need(key: str) -> str:
+            value = env.get(key, "").strip()
+            if not value:
+                raise ConfigError(f"{key} is not set (looked in {', '.join(map(str, env_files))})")
+            return value
+
+        paths = Paths(
+            bench_root=Path(env.get("BENCH_ROOT", "/disk2/vibhav/bench")),
+            trace_dir=Path(need("TRACE_DIR")),
+            lmcache_l2_dir=Path(need("LMCACHE_L2_DIR")),
+            tavily_cache_dir=Path(env.get("TAVILY_CACHE_DIR", "")),
+            vllm_log_dir=Path(env.get("VLLM_LOG_DIR", "")),
+            workflow_repo=Path(need("WORKFLOW_REPO")),
+            vllm_repos={
+                "baseline": Path(need("VLLM_BASELINE_REPO")),
+                "continuum": Path(need("VLLM_CONTINUUM_REPO")),
+                "ours": Path(need("VLLM_OURS_REPO")),
+            },
+        )
+        return cls(
+            env=env,
+            paths=paths,
+            model_name=need("MODEL_NAME"),
+            trace_path=Path(need("ODR_TRACE_PATH")),
+            gpu=int(env.get("BENCH_GPU", "0")),
+            min_free_ram_gb=float(env.get("BENCH_MIN_FREE_RAM_GB", "260")),
+            server_ready_timeout_s=float(env.get("BENCH_SERVER_READY_TIMEOUT_S", "1800")),
+            redis_url=env.get("KV_FORECAST_REDIS_URL", "redis://127.0.0.1:6379/0"),
+        )
+
+    # -- artifact layout --------------------------------------------------
+    @property
+    def run_dir(self) -> Path:
+        return self.paths.bench_root / self.run_id
+
+    def cell_dir(self, arm: str, question_id: str, rep: int) -> Path:
+        return self.run_dir / arm / question_id / f"rep{rep}"
+
+    def base_url(self, suffix: str = "/v1") -> str:
+        return f"http://localhost:{self.port}{suffix}"

@@ -1,0 +1,88 @@
+# Arm definitions: everything that differs between serving stacks.
+#
+# `server_env` / `workflow_env` are overlays on top of common.env. A key set to
+# "" is unset before launch, which is how an arm guarantees it does not inherit
+# another arm's flags.
+
+[baseline]
+description = "vLLM + LMCache MP connector + LRU"
+repo = "baseline"
+lmcache_server = true
+server_env = { LMCACHE_MP_FULL_HIT_ONLY = "0", VLLM_USE_DEEP_GEMM = "0" }
+server_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+  "--hf-overrides", '{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}',
+  "--gpu-memory-utilization", "0.95",
+  "--block-size", "16",
+  "--kv-transfer-config", '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}',
+  "--enable-prefix-caching",
+  "--seed", "0",
+  "--enable-prompt-tokens-details",
+]
+workflow_script = "tests/run_evaluate.py"
+workflow_args = ["--ablation-mode", "full"]
+workflow_env = { LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
+
+[continuum]
+# Older build: it has no built-in timestamped access log, only
+# --log-config-file, so the access lines are timestamped by the JSON below.
+# ours/baseline get the same format from vllm/logging_utils/access_log_filter.py.
+description = "vLLM-Continuum (in-process LMCache, no separate server)"
+repo = "continuum"
+lmcache_server = false
+server_env = { VLLM_USE_DEEP_GEMM = "0", LMCACHE_CONFIG_FILE = "{repo}/lmcache-config.yaml" }
+server_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+  "--hf-overrides", '{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}',
+  "--gpu-memory-utilization", "0.95",
+  "--kv-transfer-config", '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}',
+  "--log-config-file", "{plan}/runbooks/uvicorn-log-config.json",
+  "--block-size", "16",
+  "--enable-prefix-caching",
+  "--seed", "0",
+  "--enable-prompt-tokens-details",
+]
+workflow_script = "tests/run_evaluate.py"
+workflow_args = ["--ablation-mode", "baseline", "--no-kv-metrics-reset"]
+workflow_env = { LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
+
+[ours]
+description = "vLLM + agent prefetch + node eviction"
+repo = "ours"
+lmcache_server = true
+needs_redis = true
+server_env = { LMCACHE_MP_FULL_HIT_ONLY = "0", VLLM_USE_DEEP_GEMM = "0", VLLM_NODE_EVICTION_POLICY = "1", VLLM_NODE_EVICTION_CONFIG = "{repo}/node_eviction.json", VLLM_NODE_EVICTION_DECISION_LOG = "{cell}/evictions.jsonl" }
+server_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+  "--hf-overrides", '{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}',
+  "--gpu-memory-utilization", "0.95",
+  "--block-size", "16",
+  "--kv-transfer-config", '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}',
+  "--enable-prefix-caching",
+  "--seed", "0",
+  "--enable-prompt-tokens-details",
+]
+workflow_script = "tests/run_evaluate_node_eviction.py"
+workflow_args = []
+workflow_env = { LANGGRAPH_VLLM_AGENT_ENABLE = "1", LANGGRAPH_VLLM_AGENT_BASE_URL = "http://localhost:8000/v1/agents", LANGGRAPH_VLLM_AGENT_NAMESPACE = "langgraph", LANGGRAPH_VLLM_AGENT_WARMUP = "0", LANGGRAPH_VLLM_AGENT_TIMEOUT_SECONDS = "30", LANGGRAPH_VLLM_AGENT_LOG_PATH = "{cell}/agent_prefetch.jsonl", KV_PREDICTION_HORIZON = "5", KV_EVICTION_DISABLE_PREFETCH = "0" }
+
+# The recording arm: same stack as baseline, different trace mode. Kept
+# separate so a record run can never be mistaken for a measurement.
+[record]
+description = "baseline stack, recording the trace"
+repo = "baseline"
+lmcache_server = true
+server_env = { LMCACHE_MP_FULL_HIT_ONLY = "0", VLLM_USE_DEEP_GEMM = "0" }
+server_args = [
+  "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+  "--hf-overrides", '{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}',
+  "--gpu-memory-utilization", "0.95",
+  "--block-size", "16",
+  "--kv-transfer-config", '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}',
+  "--enable-prefix-caching",
+  "--seed", "0",
+  "--enable-prompt-tokens-details",
+]
+workflow_script = "tests/run_evaluate.py"
+workflow_args = ["--ablation-mode", "baseline", "--skip-cold-phase", "--no-kv-metrics-reset"]
+workflow_env = { LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }

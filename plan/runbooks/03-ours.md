@@ -1,0 +1,99 @@
+# Arm: ours — vLLM + agent prefetch + node eviction
+
+The only arm that uses `/v1/agents/*`, the node-eviction policy and Redis.
+
+```bash
+set -a; . ~/.bench.env; . ./common.env; set +a
+export ARM=ours QID=q1 REP=1
+export CELL=/disk2/vibhav/bench/$(date +%Y%m%d)/$ARM/$QID/rep$REP
+mkdir -p "$CELL/stats" "$VLLM_LOG_DIR/debug" "$VLLM_LOG_DIR/kv-prediction-transitions"
+```
+
+### 1. Preflight
+
+Same checks as [00-record.md](00-record.md) step 1, plus Redis:
+
+```bash
+redis-cli -u redis://127.0.0.1:6379/0 ping        # expect PONG
+```
+
+### 2. LMCache — stop, wipe, start
+
+```bash
+tmux kill-session -t lmcache 2>/dev/null
+rm -rf "$LMCACHE_L2_DIR"
+tmux new-session -d -s lmcache
+tmux send-keys -t lmcache 'LMCACHE_LOG_KV_HASH=1 lmcache server \
+  --l1-size-gb 200 --eviction-policy LRU --chunk-size 16 \
+  --host 0.0.0.0 --port 10903 \
+  --l2-adapter "{\"type\":\"fs\",\"base_path\":\"'"$LMCACHE_L2_DIR"'\"}"' Enter
+```
+
+### 3. vLLM — our build
+
+`VLLM_NODE_EVICTION_PREFETCH_DRAIN` and `_INTERVAL_S` are **gone** as of
+`f47e7521b` (engine-side prefetch origination removed); do not export them.
+
+```bash
+tmux kill-session -t vllm 2>/dev/null
+tmux new-session -d -s vllm -c "$VLLM_OURS_REPO"
+tmux send-keys -t vllm 'export VLLM_NODE_EVICTION_POLICY=1 \
+  VLLM_NODE_EVICTION_REDIS_URL=redis://127.0.0.1:6379/0 \
+  VLLM_NODE_EVICTION_CONFIG='"$VLLM_OURS_REPO"'/node_eviction.json \
+  VLLM_NODE_EVICTION_DECISION_LOG='"$CELL"'/evictions.jsonl \
+  VLLM_REQUEST_STATS_DIR='"$CELL"'/stats' Enter
+tmux send-keys -t vllm 'LMCACHE_MP_FULL_HIT_ONLY=0 VLLM_USE_DEEP_GEMM=0 \
+vllm serve '"$MODEL_NAME"' --port 8000 \
+  --enable-auto-tool-choice --tool-call-parser hermes \
+  --hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}" \
+  --gpu-memory-utilization 0.95 \
+  --block-size 16 \
+  --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"}" \
+  --enable-prefix-caching \
+  --seed 0 \
+  --enable-prompt-tokens-details > '"$CELL"'/server.log 2>&1' Enter
+
+until curl -sf localhost:8000/v1/models >/dev/null; do sleep 5; done; echo READY
+```
+
+### 4. Workflow — pinned replay with the agent path on
+
+```bash
+cd "$WORKFLOW_REPO"
+export LANGGRAPH_VLLM_AGENT_ENABLE=1
+export LANGGRAPH_VLLM_AGENT_BASE_URL=http://localhost:8000/v1/agents
+export LANGGRAPH_VLLM_AGENT_MODEL=$MODEL_NAME
+export LANGGRAPH_VLLM_AGENT_NAMESPACE=langgraph
+export LANGGRAPH_VLLM_AGENT_WARMUP=0
+export LANGGRAPH_VLLM_AGENT_TIMEOUT_SECONDS=30
+export LANGGRAPH_VLLM_AGENT_LOG_PATH=$CELL/agent_prefetch.jsonl
+
+export KV_PREDICTION_HORIZON=5
+export KV_EVICTION_DISABLE_PREFETCH=0
+export KV_FORECAST_REDIS_URL=redis://127.0.0.1:6379/0
+export KV_PREDICTION_TRANSITION_STORE=$VLLM_LOG_DIR/kv-prediction-transitions/transitions.json
+
+export ODR_TRACE_MODE=pinned
+export ODR_TRACE_ON_MISS=strict
+export ODR_TRACE_REPORT=$CELL/divergence.jsonl
+
+date +%s.%N > "$CELL/question_started_ts"
+python tests/run_evaluate_node_eviction.py \
+  --max-queries 1 --completions-per-query 1 \
+  2>&1 | tee "$CELL/workflow.log"
+```
+
+The system-prompt-population phase runs by default and is **required** here:
+since `f47e7521b`, plain `/v1/chat/completions` no longer registers prefixes —
+only `/v1/agents/*` does — so skipping it leaves the registry empty and every
+prefetch silently no-ops. Do not pass `--skip-system-prompt-population` unless
+a previous invocation seeded the same server.
+
+### 5. Collect, then teardown
+
+```bash
+python tests/analyze_divergence.py "$ODR_TRACE_REPORT"
+wc -l "$CELL/agent_prefetch.jsonl"    # 0 prefetches ⇒ the cell is invalid
+grep -c prefetch_only "$CELL"/stats/finished_requests_engine0_*.jsonl
+tmux kill-session -t vllm; tmux kill-session -t lmcache
+```
