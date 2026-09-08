@@ -101,7 +101,7 @@ a previous invocation seeded the same server.
 
 ### 4b. Prefetch routes and their switches
 
-Four routes fire in this arm; each writes its own `event` into
+Three routes fire in this arm; each writes its own `event` into
 `job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
 can be turned off without touching the others.
 
@@ -110,20 +110,20 @@ can be turned off without touching the others.
 | `replay_prefetch` | before the producing call | none | one POST |
 | `replay_prefetch_nested` | before the producing call | none | one POST |
 | `replay_prefetch_completion` | the instant the response returns | next turn's exact messages | one POST |
-| `compress_research_seed` | terminal researcher turn | the compress prompt | **a real prefill** |
 
 ```bash
 ODR_REPLAY_PREFETCH=0                # the two up-front routes
 ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
 ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
-ODR_COMPRESS_SEED=0                  # the compress prefill
 ```
 
-`compress_research_seed` is the only one that spends compute on a prediction:
-`compress_research` opens with its own system block, so it shares no prefix
-with the researcher conversation it then copies verbatim and the whole history
-is prefilled again. The seed pays that prefill during the gap instead. Run it
-as its own arm — a run with it on is not comparable to one without.
+None of them spends compute on a prediction: a seed the cache turns out not to
+hold aborts rather than prefilling, so a wrong guess costs one POST. A
+`compress_research` seed was built and removed for the opposite reason — it
+opens with its own system block, so it shares no prefix with the researcher
+conversation it then copies verbatim, and warming it means prefilling the whole
+history speculatively. See `17dc52f` in the workflow repo if that arm is ever
+wanted; it is not on by default and should not be mixed into these cells.
 
 Check the seeds landed:
 
