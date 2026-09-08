@@ -101,7 +101,7 @@ a previous invocation seeded the same server.
 
 ### 4b. Prefetch routes and their switches
 
-Three routes fire in this arm; each writes its own `event` into
+Four routes fire in this arm; each writes its own `event` into
 `job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
 can be turned off without touching the others.
 
@@ -110,12 +110,20 @@ can be turned off without touching the others.
 | `replay_prefetch` | before the producing call | none |
 | `replay_prefetch_nested` | before the producing call | none |
 | `replay_prefetch_completion` | the instant the response returns | next turn's exact messages |
+| `compress_research_seed` | terminal researcher turn | the compress prompt |
 
 ```bash
 ODR_REPLAY_PREFETCH=0                # the two up-front routes
 ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
 ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
+ODR_COMPRESS_SEED=0                  # the compress prefill
 ```
+
+`compress_research_seed` is the one route whose wrong guesses cost compute
+rather than a POST: `compress_research` opens with its own system block, so it
+shares no prefix with the researcher conversation it then copies verbatim and
+the whole history is prefilled from nothing. The seed pays that prefill in the
+gap instead. Idle-only now (below), but still compute — run it as its own arm.
 
 All three send `prefill_on_miss`, which the server defaults on: a phantom whose
 prefix LMCache does not hold prefills it instead of aborting. The scheduler
