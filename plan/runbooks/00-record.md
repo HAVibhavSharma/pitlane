@@ -80,6 +80,20 @@ print(len(jobs), "jobs:", dict(jobs))
 PY
 ```
 
+Every record row must carry `record_started_s` / `record_finished_s` — the wall
+stamps that give the gap between one call finishing and the next one starting.
+A trace recorded before they existed still replays, but every
+`replay_prefetch_completion` row logs `slack_s: null`.
+
+```bash
+python - <<'EOS'
+import json, os
+rows = [json.loads(l) for l in open(os.environ["ODR_TRACE_PATH"])]
+missing = sum(1 for r in rows if "record_started_s" not in r)
+print(f"{len(rows)} rows, {missing} without wall stamps")
+EOS
+```
+
 Freeze `$TAVILY_CACHE_DIR` from here on — a cache miss mid-study fetches live
 and injects new content into one arm only.
 
