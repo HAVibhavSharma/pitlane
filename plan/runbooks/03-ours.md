@@ -83,6 +83,16 @@ python tests/run_evaluate_node_eviction.py \
   2>&1 | tee "$CELL/workflow.log"
 ```
 
+Chat calls route to `/v1/agents/chat/completions` automatically: with
+`LANGGRAPH_VLLM_AGENT_ENABLE=1` the request carries an `agent_id`, and ODR's
+`get_model_config` then appends `/agents` to `OPENAI_BASE_URL`. That endpoint
+records each served prompt in the prefix registry, which is what a later
+prefetch warms — plain `/v1/chat/completions` stopped registering at
+`f47e7521b`, so without it the registry holds only the seeded system prompts
+(~160 tokens) and no phantom can touch the accumulated conversation. Costs one
+extra tokenization per request, paid only by this arm. Set
+`ODR_AGENT_CHAT_ROUTE=0` to go back to the plain endpoint.
+
 The system-prompt-population phase runs by default and is **required** here:
 since `f47e7521b`, plain `/v1/chat/completions` no longer registers prefixes —
 only `/v1/agents/*` does — so skipping it leaves the registry empty and every
