@@ -101,7 +101,7 @@ a previous invocation seeded the same server.
 
 ### 4b. Prefetch routes and their switches
 
-Four routes fire in this arm; each writes its own `event` into
+Five routes fire in this arm; each writes its own `event` into
 `job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
 can be turned off without touching the others.
 
@@ -111,16 +111,24 @@ can be turned off without touching the others.
 | `replay_prefetch_nested` | before the producing call | none |
 | `replay_prefetch_completion` | the instant the response returns | next turn's exact messages |
 | `compress_research_seed` | terminal researcher turn | the compress prompt |
+| `final_report_seed` | supervisor request goes out | the whole final-report prompt |
 
 ```bash
 ODR_REPLAY_PREFETCH=0                # the two up-front routes
 ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
 ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
 ODR_COMPRESS_SEED=0                  # the compress prefill
+ODR_FINAL_REPORT_SEED=0              # the final-report prefill
+ODR_REACT_PREFETCH_TOP_K=5           # prefixes a react warm asks for
 ```
 
-`compress_research_seed` is the one route whose wrong guesses cost compute
-rather than a POST: `compress_research` opens with its own system block, so it
+`final_report_seed` targets the largest prompt in the run — 11k-70k chars,
+of which only 132 are shareable with anything else, because `{research_brief}`
+sits near the top and shifts everything after it. It is rebuilt from the
+supervisor's own request and seeded while that call decodes.
+
+`compress_research_seed` and `final_report_seed` are the routes whose wrong
+guesses cost compute rather than a POST: `compress_research` opens with its own system block, so it
 shares no prefix with the researcher conversation it then copies verbatim and
 the whole history is prefilled from nothing. The seed pays that prefill in the
 gap instead. Idle-only now (below), but still compute — run it as its own arm.
