@@ -99,6 +99,50 @@ only `/v1/agents/*` does — so skipping it leaves the registry empty and every
 prefetch silently no-ops. Do not pass `--skip-system-prompt-population` unless
 a previous invocation seeded the same server.
 
+### 4b. Prefetch routes and their switches
+
+Four routes fire in this arm; each writes its own `event` into
+`job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
+can be turned off without touching the others.
+
+| event | fires | seed | cost of a wrong guess |
+|---|---|---|---|
+| `replay_prefetch` | before the producing call | none | one POST |
+| `replay_prefetch_nested` | before the producing call | none | one POST |
+| `replay_prefetch_completion` | the instant the response returns | next turn's exact messages | one POST |
+| `compress_research_seed` | terminal researcher turn | the compress prompt | **a real prefill** |
+
+```bash
+ODR_REPLAY_PREFETCH=0                # the two up-front routes
+ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
+ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
+ODR_COMPRESS_SEED=0                  # the compress prefill
+```
+
+`compress_research_seed` is the only one that spends compute on a prediction:
+`compress_research` opens with its own system block, so it shares no prefix
+with the researcher conversation it then copies verbatim and the whole history
+is prefilled again. The seed pays that prefill during the gap instead. Run it
+as its own arm — a run with it on is not comparable to one without.
+
+Check the seeds landed:
+
+```bash
+python - <<'EOS'
+import json, os, glob
+for path in glob.glob(os.path.join(os.environ["CELL"], "*.replay_prefetch.jsonl")):
+    rows = [json.loads(l) for l in open(path)]
+    for event in sorted({r["event"] for r in rows}):
+        sel = [r for r in rows if r["event"] == event]
+        took = sum(1 for r in sel if r.get("seeded_from_messages"))
+        print(f"{event:30s} {len(sel):4d} rows, {took:4d} seeds accepted")
+EOS
+```
+
+`seeds accepted` at 0 on rows that sent one means the server predates
+`messages=` on `/v1/agents/prefetch` — it warmed the registry's shorter prefix
+instead, silently.
+
 ### 5. Collect, then teardown
 
 ```bash
