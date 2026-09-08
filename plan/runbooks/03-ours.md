@@ -105,11 +105,11 @@ Three routes fire in this arm; each writes its own `event` into
 `job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
 can be turned off without touching the others.
 
-| event | fires | seed | cost of a wrong guess |
-|---|---|---|---|
-| `replay_prefetch` | before the producing call | none | one POST |
-| `replay_prefetch_nested` | before the producing call | none | one POST |
-| `replay_prefetch_completion` | the instant the response returns | next turn's exact messages | one POST |
+| event | fires | seed |
+|---|---|---|
+| `replay_prefetch` | before the producing call | none |
+| `replay_prefetch_nested` | before the producing call | none |
+| `replay_prefetch_completion` | the instant the response returns | next turn's exact messages |
 
 ```bash
 ODR_REPLAY_PREFETCH=0                # the two up-front routes
@@ -117,15 +117,18 @@ ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
 ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
 ```
 
-None of them spends compute on a prediction: a seed the cache turns out not to
-hold aborts rather than prefilling, so a wrong guess costs one POST. A
-`compress_research` seed was built and removed for the opposite reason — it
-opens with its own system block, so it shares no prefix with the researcher
-conversation it then copies verbatim, and warming it means prefilling the whole
-history speculatively. See `17dc52f` in the workflow repo if that arm is ever
-wanted; it is not on by default and should not be mixed into these cells.
+All three send `prefill_on_miss`, which the server defaults on: a phantom whose
+prefix LMCache does not hold prefills it instead of aborting. The scheduler
+only admits such a phantom into a step with **no real request running**, and
+drops it if no idle step arrives — so the cost lands on idle GPU time and HBM
+pressure, never on another request's token budget.
 
-Check the seeds landed:
+```bash
+VLLM_PREFETCH_PREFILL_MAX_RUNNING=0       # real requests tolerated (0 = strictly idle)
+VLLM_PREFETCH_PREFILL_DEFER_TIMEOUT_S=30  # then finish it without prefilling
+```
+
+Check the seeds landed and the prefills found a gap:
 
 ```bash
 python - <<'EOS'
@@ -135,13 +138,27 @@ for path in glob.glob(os.path.join(os.environ["CELL"], "*.replay_prefetch.jsonl"
     for event in sorted({r["event"] for r in rows}):
         sel = [r for r in rows if r["event"] == event]
         took = sum(1 for r in sel if r.get("seeded_from_messages"))
-        print(f"{event:30s} {len(sel):4d} rows, {took:4d} seeds accepted")
+        pre = sum(1 for r in sel if r.get("prefill_on_miss"))
+        print(f"{event:30s} {len(sel):4d} rows, {took:4d} seeds accepted, "
+              f"{pre:4d} allowed to prefill")
+EOS
+
+# did the deferred prefills ever get an idle step?
+python - <<'EOS'
+import json, glob, os
+for path in glob.glob(os.path.join(os.environ["CELL"], "stats", "scheduler_engine*.jsonl")):
+    last = [json.loads(l) for l in open(path)][-1]
+    print(path.split("/")[-1],
+          "deferrals:", last.get("num_prefetch_prefill_deferrals"),
+          "expired:", last.get("num_prefetch_prefill_expired"))
 EOS
 ```
 
 `seeds accepted` at 0 on rows that sent one means the server predates
 `messages=` on `/v1/agents/prefetch` — it warmed the registry's shorter prefix
-instead, silently.
+instead, silently. `expired` tracking `deferrals` means the run never had an
+idle step, so no phantom prefill ever ran and the warms fell back to promotion
+only.
 
 ### 5. Collect, then teardown
 
