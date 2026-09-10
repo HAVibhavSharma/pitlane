@@ -1,7 +1,11 @@
-"""results.csv and summary.md.
+"""results.csv, requests.csv and summary.md.
 
-One row per cell in the CSV; the markdown pivots it to one table per question
-with a row per arm, which is the shape the write-up needs.
+One row per cell in `results.csv`; the markdown pivots it to one table per
+question with a row per arm, which is the shape the write-up needs.
+`requests.csv` is the level below: one row per chat completion, carrying the
+`job_id` / `agent_id` that let it be grouped any other way afterwards. Every
+cell-level number is a sum over those rows, so an aggregate is a group-by and
+never a re-derivation.
 """
 
 from __future__ import annotations
@@ -17,6 +21,9 @@ _COLUMNS = [
     "ttft_s", "kv_hit_rate", "query_tokens", "token_hits",
     "external_token_hits", "workflow_output_tokens",
     "total_prefetches", "late_prefetches", "late_prefetch_pct", "unused_prefetches",
+    "useful_prefetches", "useful_prefetch_pct",
+    "prefetch_lead_mean_s", "prefetch_lead_min_s",
+    "prefetch_lead_min_threshold_s", "lead_window_mean_s", "lead_markers",
     "sched_running_mean", "sched_running_max", "sched_waiting_mean", "sched_waiting_max",
     "sched_scheduled_total", "sched_admissions_total", "sched_preempted_total",
     "requests", "wall_clock_s", "trace_misses", "off_pin_requests",
@@ -65,8 +72,9 @@ def summary(results_csv: Path) -> str:
         lines += [header, ""]
         lines += [
             "| Arm | rep | cache | TTFT (s) | KV hit rate | Query tokens | Token hits | "
-            "Prefetches | Late % | Waiting (max) | Notes |",
-            "|---|---|---|---|---|---|---|---|---|---|---|",
+            "Prefetches | Useful | Useful % | Late % | Lead (mean s) | "
+            "Oracle window (s) | Waiting (max) | Notes |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in sorted(subset, key=lambda r: (r["arm"], int(r["rep"] or 1))):
             notes = []
@@ -80,7 +88,11 @@ def summary(results_csv: Path) -> str:
                 f"{_fmt(row['kv_hit_rate'], '.2%')} | "
                 f"{_fmt(row['query_tokens'])} | {_fmt(row['token_hits'])} | "
                 f"{_fmt(row['total_prefetches'])} | "
+                f"{_fmt(row['useful_prefetches'])} | "
+                f"{_fmt(row['useful_prefetch_pct'], '.0%')} | "
                 f"{_fmt(row['late_prefetch_pct'], '.0%')} | "
+                f"{_fmt(row['prefetch_lead_mean_s'], '.3f')} | "
+                f"{_fmt(row['lead_window_mean_s'], '.3f')} | "
                 f"{_fmt(row['sched_waiting_max'])} | {', '.join(notes) or '—'} |"
             )
         lines.append("")
@@ -91,6 +103,32 @@ def write_summary(run_dir: Path) -> Path:
     path = run_dir / "summary.md"
     path.write_text(summary(run_dir / "results.csv"))
     return path
+
+
+_REQUEST_COLUMNS = [
+    "arm", "question_id", "rep", "seq", "job_id", "agent_id", "langgraph_node",
+    "request_id", "arrival_ts", "finish_ts", "ttft_s", "e2e_s",
+    "query_tokens", "token_hits", "external_token_hits", "kv_hit_rate",
+    "output_tokens", "prefetches", "late_prefetches", "useful",
+    "credited_tokens", "prefetch_lead_s",
+    "max_lead_ts", "min_lead_ts", "lead_window_s",
+]
+
+
+def append_request_rows(requests_csv: Path, metrics: Metrics) -> None:
+    """One row per chat completion, appended across every cell of the run."""
+    if not metrics.per_request:
+        return
+    scope = {"arm": metrics.arm, "question_id": metrics.question_id, "rep": metrics.rep}
+    new = not requests_csv.exists()
+    requests_csv.parent.mkdir(parents=True, exist_ok=True)
+    with requests_csv.open("a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_REQUEST_COLUMNS)
+        if new:
+            writer.writeheader()
+        for entry in metrics.per_request:
+            merged = {**scope, **entry}
+            writer.writerow({key: merged.get(key) for key in _REQUEST_COLUMNS})
 
 
 def write_metrics(cell: Path, metrics: Metrics) -> Path:

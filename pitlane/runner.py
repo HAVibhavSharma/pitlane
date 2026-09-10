@@ -69,6 +69,7 @@ def run_cell(
     collected = metrics_mod.collect(
         cell, arm=arm.name, question_id=question_id, rep=rep,
         t0=result.started_ts, t1=result.finished_ts, cache_state=cache_state,
+        lead_min_s=config.prefetch_lead_min_s,
     )
     if result.exit_code != 0:
         collected.warnings.append(f"workflow exited {result.exit_code}")
@@ -79,6 +80,7 @@ def run_cell(
 
     report.write_metrics(cell, collected)
     report.append_row(config.run_dir / "results.csv", collected)
+    report.append_request_rows(config.run_dir / "requests.csv", collected)
     report.write_summary(config.run_dir)
 
     if not keep_stack and not reuse_stack and not dry_run:

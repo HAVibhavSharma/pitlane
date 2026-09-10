@@ -11,7 +11,9 @@ Sources, all wall-clock epoch seconds and therefore joinable:
 from __future__ import annotations
 
 import json
+import re
 import statistics
+from datetime import datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,6 +21,35 @@ from typing import Any, Iterable
 # The graph node whose response is the final output. ODR names it; a workflow
 # that does not is handled by falling back to the last request of the job.
 FINAL_NODE_CANDIDATES = ("final_report_generation", "final_report", "generate_patch")
+
+# APC matches on whole blocks, so a phantom is only credited with residency it
+# added in block-sized units. A credit of 1-15 tokens is the partial trailing
+# block every prompt has and is noise, not a hit.
+BLOCK_SIZE = 16
+
+# A phantom is late when it left too close in front of the request it warms to
+# have done anything with the time. Both stamps come from the request rows --
+# `arrival_ts` on the phantom and on its consumer -- so this is the engine's own
+# view on both sides, not a log join.
+#
+# There is no physical constant to pin the threshold to, so it is a knob and the
+# lead distribution is reported next to it: read `late_prefetch_pct` together
+# with `prefetch_lead_mean_s` / `prefetch_lead_min_s`, never alone. This is the
+# default only; a run takes it from `BENCH_PREFETCH_LEAD_MIN_S` via `Config`,
+# which is the one place user knobs are read.
+LEAD_MIN_S = 0.1
+
+# `POST /v1/echo` markers, as the server logs them. Two clocks would have to be
+# reconciled to measure this any other way -- the client's decision instants
+# live in its own process -- so the client posts them and the server stamps them
+# on its own timeline, which is the same clock `arrival_ts` is on.
+#
+#   echo: event=max_lead agent_id=langgraph:1:...:supervisor issuer=workflow ...
+_ECHO_LINE = re.compile(
+    r"(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*?"
+    r"echo: event=(?P<event>\w+) agent_id=(?P<agent>\S+)"
+)
+_LEAD_EVENTS = ("min_lead", "max_lead")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -57,6 +88,55 @@ def first_token_ts(row: dict[str, Any]) -> float | None:
 
 
 @dataclass
+class RequestMetrics:
+    """One chat completion, keyed by the ids that survive aggregation.
+
+    Everything the cell reports is a sum over these rows, so the cell numbers
+    stay derivable and a regression can be traced to the node that caused it
+    rather than to the question. `seq` is the request's position on the wire,
+    which is what joins the same prompt across arms under pinned replay --
+    `agent_id` alone repeats whenever a node takes more than one turn.
+    """
+
+    job_id: str | None = None
+    agent_id: str | None = None
+    langgraph_node: str | None = None
+    request_id: str | None = None
+    seq: int = 0
+
+    arrival_ts: float | None = None
+    finish_ts: float | None = None
+    ttft_s: float | None = None
+    e2e_s: float | None = None
+
+    query_tokens: int = 0
+    token_hits: int = 0
+    external_token_hits: int = 0
+    output_tokens: int = 0
+    kv_hit_rate: float | None = None
+
+    # Phantoms that named this request as their consumer.
+    prefetches: int = 0
+    late_prefetches: int = 0
+    useful: bool = False
+    credited_tokens: int = 0
+    prefetch_lead_s: float | None = None
+
+    # The `/v1/echo` markers, as the server stamped them. `max_lead_ts` is when
+    # the workflow oracle issued the warm; `min_lead_ts` is when the graph
+    # runtime parsed the tool call naming this node, which is the earliest a
+    # real predictor could know. `lead_window_s` is the span between them: what
+    # reading the recording buys over predicting, measured entirely from the two
+    # markers and referred to nothing else.
+    min_lead_ts: float | None = None
+    max_lead_ts: float | None = None
+    lead_window_s: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Metrics:
     arm: str = ""
     question_id: str = ""
@@ -76,7 +156,14 @@ class Metrics:
     total_prefetches: int = 0
     late_prefetches: int = 0
     unused_prefetches: int = 0
+    useful_prefetches: int = 0
     late_prefetch_pct: float | None = None
+    useful_prefetch_pct: float | None = None
+    prefetch_lead_mean_s: float | None = None
+    prefetch_lead_min_s: float | None = None
+    prefetch_lead_min_threshold_s: float = LEAD_MIN_S
+    lead_window_mean_s: float | None = None
+    lead_markers: int = 0
     prefetch_wait_mode: str | None = None
 
     sched_running_mean: float | None = None
@@ -88,6 +175,7 @@ class Metrics:
     sched_preempted_total: int = 0
 
     requests: int = 0
+    per_request: list[dict[str, Any]] = field(default_factory=list)
     wall_clock_s: float | None = None
     trace_misses: int = 0
     off_pin_requests: int = 0
@@ -121,8 +209,10 @@ def collect(
     t0: float | None = None,
     t1: float | None = None,
     cache_state: str = "cold",
+    lead_min_s: float = LEAD_MIN_S,
 ) -> Metrics:
-    metrics = Metrics(arm=arm, question_id=question_id, rep=rep, cache_state=cache_state)
+    metrics = Metrics(arm=arm, question_id=question_id, rep=rep, cache_state=cache_state,
+                      prefetch_lead_min_threshold_s=lead_min_s)
 
     if t0 is None:
         stamp = cell / "question_started_ts"
@@ -145,7 +235,9 @@ def collect(
 
     _token_metrics(metrics, real)
     _ttft(metrics, real, t0)
-    _prefetch(metrics, cell, phantom, real)
+    _requests(metrics, real)
+    _prefetch(metrics, cell, phantom, real, lead_min_s)
+    _lead_markers(metrics, cell, real)
     _scheduler(metrics, stats_dir, t0, t1)
     _divergence(metrics, cell / "divergence.jsonl")
     return metrics
@@ -185,8 +277,63 @@ def _ttft(metrics: Metrics, real: list[dict[str, Any]], t0: float | None) -> Non
         metrics.ttft_s = first - t0
 
 
+def _requests(metrics: Metrics, real: list[dict[str, Any]]) -> None:
+    """One row per chat completion, in wire order. Prefetch fields filled later."""
+    for seq, row in enumerate(sorted(real, key=lambda r: r.get("arrival_ts") or 0.0), 1):
+        entry = RequestMetrics(
+            job_id=row.get("job_id"),
+            agent_id=row.get("agent_id"),
+            langgraph_node=row.get("langgraph_node"),
+            request_id=row.get("request_id"),
+            seq=seq,
+            arrival_ts=row.get("arrival_ts"),
+            finish_ts=row.get("finish_ts"),
+            query_tokens=row.get("num_prompt_tokens") or 0,
+            token_hits=row.get("num_local_cached_tokens") or 0,
+            external_token_hits=row.get("num_external_cached_tokens") or 0,
+            output_tokens=row.get("num_generation_tokens") or 0,
+        )
+        first = first_token_ts(row)
+        if first is not None and entry.arrival_ts is not None:
+            entry.ttft_s = first - entry.arrival_ts
+        if entry.arrival_ts is not None and entry.finish_ts is not None:
+            entry.e2e_s = entry.finish_ts - entry.arrival_ts
+        if entry.query_tokens:
+            entry.kv_hit_rate = entry.token_hits / entry.query_tokens
+        metrics.per_request.append(entry.to_dict())
+
+
+def _credited_tokens(ghost: dict[str, Any], consumer: dict[str, Any]) -> int:
+    """HBM residency this phantom added that its consumer went on to hit.
+
+    A phantom's own `num_local_cached_tokens` is how much of the prefix was
+    already in HBM at the moment it ran, so everything past that mark is what it
+    brought in -- promoted from LMCache or prefilled outright. The consumer's
+    local hit is capped at the phantom's prompt because a consumer can hit
+    further than the phantom ever covered, and that tail belongs to something
+    else.
+
+    Both sides are floored to a block: a phantom that pulls a prefix HBM already
+    holds returns <= 0 here, which is the case this metric exists to reject.
+    """
+    covered = min(
+        consumer.get("num_local_cached_tokens") or 0,
+        ghost.get("num_prompt_tokens") or 0,
+    )
+    already = ghost.get("num_local_cached_tokens") or 0
+    credited = (covered // BLOCK_SIZE - already // BLOCK_SIZE) * BLOCK_SIZE
+    return max(credited, 0)
+
+
 def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
-              real: list[dict[str, Any]]) -> None:
+              real: list[dict[str, Any]], lead_min_s: float = LEAD_MIN_S) -> None:
+    """Attribute every phantom to the chat completion it warmed.
+
+    The unit is the consumer, not the cell: each phantom is charged to one
+    request row, and the cell's counters are sums over those rows plus the
+    phantoms that never found a consumer at all. Aggregating later is then a
+    group-by on `agent_id` / `job_id` rather than a re-derivation.
+    """
     agent_log = _read_jsonl(cell / "agent_prefetch.jsonl")
     metrics.total_prefetches = len(phantom)
     if agent_log:
@@ -196,10 +343,14 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
     if not phantom:
         return
 
+    ordered = sorted(real, key=lambda r: r.get("arrival_ts") or 0.0)
     by_agent: dict[str | None, list[dict[str, Any]]] = {}
-    for row in sorted(real, key=lambda r: r.get("arrival_ts") or 0.0):
+    for row in ordered:
         by_agent.setdefault(row.get("agent_id"), []).append(row)
+    # `_requests` walked the same order, so position is the join.
+    entry_of = {id(row): metrics.per_request[i] for i, row in enumerate(ordered)}
 
+    leads: list[float] = []
     for ghost in phantom:
         issued = ghost.get("arrival_ts") or 0.0
         finished = ghost.get("finish_ts") or 0.0
@@ -210,17 +361,130 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
         )
         if consumer is None:
             metrics.unused_prefetches += 1
-        elif (consumer.get("arrival_ts") or 0.0) < finished:
-            # The workload arrived while the phantom was still pulling: the
-            # promotion did not finish in time to be a hit.
-            metrics.late_prefetches += 1
+            continue
+
+        entry = entry_of[id(consumer)]
+        entry["prefetches"] += 1
+
+        # Lead: how far in front of the request it warms this phantom left.
+        # Both stamps are the engine's `arrival_ts`, so the HTTP and
+        # chat-template time on either side cancels and what is left is the gap
+        # the prefetcher actually bought.
+        consumer_start = consumer.get("arrival_ts") or 0.0
+        lead = consumer_start - issued
+        leads.append(lead)
+        if lead < lead_min_s:
+            entry["late_prefetches"] += 1
+        if entry["prefetch_lead_s"] is None or lead > entry["prefetch_lead_s"]:
+            entry["prefetch_lead_s"] = lead
+
+        if consumer_start < finished:
+            # It had not finished when the request arrived, so the blocks were
+            # not there to hit and it cannot be useful. Not the same test as
+            # `late`, which is a judgement about whether the lead was worth
+            # having: a millisecond-long LMCache promotion can be late and still
+            # land, and a seeded prefill can be on time and still miss this.
+            continue
+
+        # A React warm asks for `top_k` prefixes and they all name the same
+        # consumer, so the request keeps the best credit rather than banking one
+        # hit `top_k` times.
+        credited = _credited_tokens(ghost, consumer)
+        if credited > entry["credited_tokens"]:
+            entry["credited_tokens"] = credited
+            entry["useful"] = True
+
+    metrics.late_prefetches = sum(e["late_prefetches"] for e in metrics.per_request)
+    metrics.useful_prefetches = sum(1 for e in metrics.per_request if e["useful"])
+    metrics.useful_prefetch_pct = metrics.useful_prefetches / metrics.total_prefetches
+
+    if leads:
+        metrics.prefetch_lead_mean_s = statistics.fmean(leads)
+        metrics.prefetch_lead_min_s = min(leads)
 
     if metrics.prefetch_wait_mode == "True":
-        # A blocking prefetch cannot be late: the client does not send the real
-        # request until it returns. Reporting a 0% here would look like success.
+        # A blocking prefetch has no lead to measure: the client does not send
+        # the real request until it returns, so every lead is ~0 and the late %
+        # would read 100% by construction.
         metrics.warnings.append("prefetches issued with wait=true; late % not meaningful")
         return
     metrics.late_prefetch_pct = metrics.late_prefetches / metrics.total_prefetches
+
+
+def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> None:
+    """Record each request's `/v1/echo` lead markers, and the span between them.
+
+    The only metric here read from the server log, and it has to be: the two
+    instants are client-side decisions with no request of their own, so the
+    marker the client posted and the server stamped is the only record. Routing
+    them through `/v1/echo` puts both on the server's clock, which is what makes
+    the span between them meaningful at all.
+
+    The reported value is the markers' own: `lead_window_s = min_lead_ts -
+    max_lead_ts`, the interval the oracle knew about a target before a real
+    predictor could have. Request timestamps are used only to decide *which*
+    request a marker belongs to, never to compute the value.
+
+    A marker is paired with the next request of the same `agent_id`, latest
+    marker first -- markers and requests are both in time order, so a node that
+    takes several turns gets the marker belonging to its turn.
+    """
+    log = cell / "server.log"
+    if not log.exists():
+        return
+
+    ordered = sorted(real, key=lambda r: r.get("arrival_ts") or 0.0)
+    entry_of = {id(row): metrics.per_request[i] for i, row in enumerate(ordered)}
+    by_agent: dict[str | None, list[dict[str, Any]]] = {}
+    for row in ordered:
+        by_agent.setdefault(row.get("agent_id"), []).append(row)
+
+    for line in log.read_text(errors="replace").splitlines():
+        match = _ECHO_LINE.search(line)
+        if not match or match["event"] not in _LEAD_EVENTS:
+            continue
+        try:
+            stamp = datetime.strptime(match["ts"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
+        except ValueError:
+            continue
+        metrics.lead_markers += 1
+        consumer = next(
+            (r for r in by_agent.get(match["agent"], [])
+             if (r.get("arrival_ts") or 0.0) >= stamp),
+            None,
+        )
+        if consumer is None:
+            continue
+        entry = entry_of[id(consumer)]
+        # The latest marker of each kind before the request wins: for a repeated
+        # node that is the one belonging to this turn rather than an earlier one.
+        field_name = f"{match['event']}_ts"
+        if entry[field_name] is None or stamp > entry[field_name]:
+            entry[field_name] = stamp
+
+    windows: list[float] = []
+    paired = 0
+    for entry in metrics.per_request:
+        if entry["min_lead_ts"] is not None or entry["max_lead_ts"] is not None:
+            paired += 1
+        if entry["min_lead_ts"] is not None and entry["max_lead_ts"] is not None:
+            entry["lead_window_s"] = entry["min_lead_ts"] - entry["max_lead_ts"]
+            windows.append(entry["lead_window_s"])
+    if windows:
+        metrics.lead_window_mean_s = statistics.fmean(windows)
+
+    if metrics.total_prefetches and not metrics.lead_markers:
+        metrics.warnings.append(
+            "prefetches issued but no /v1/echo lead markers in server.log"
+        )
+    elif metrics.lead_markers and not paired:
+        # Markers were logged but none named an agent this cell served. That is
+        # the join breaking, not an absence of data, and it would otherwise show
+        # up only as empty columns.
+        metrics.warnings.append(
+            f"{metrics.lead_markers} /v1/echo lead marker(s) matched no request; "
+            "agent_id mismatch or markers outside the question window"
+        )
 
 
 def _scheduler(metrics: Metrics, stats_dir: Path, t0: float | None, t1: float | None) -> None:

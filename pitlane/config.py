@@ -76,6 +76,8 @@ class Config:
     port: int = 8000
     lmcache_port: int = 10903
     redis_url: str = "redis://127.0.0.1:6379/0"
+    # Below this lead a phantom is counted late -- see `metrics.LEAD_MIN_S`.
+    prefetch_lead_min_s: float = 0.1
 
     # Resolved at run time, not from the env file.
     run_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -118,6 +120,7 @@ class Config:
             min_free_ram_gb=float(env.get("BENCH_MIN_FREE_RAM_GB", "260")),
             server_ready_timeout_s=float(env.get("BENCH_SERVER_READY_TIMEOUT_S", "1800")),
             redis_url=env.get("KV_FORECAST_REDIS_URL", "redis://127.0.0.1:6379/0"),
+            prefetch_lead_min_s=float(env.get("BENCH_PREFETCH_LEAD_MIN_S", "0.1")),
         )
 
     # -- artifact layout --------------------------------------------------

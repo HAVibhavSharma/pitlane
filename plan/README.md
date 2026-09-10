@@ -8,7 +8,7 @@
 
 ## Where a question is answered
 
-- *What does TTFT / KV hit rate / late prefetch mean here?* →
+- *What does TTFT / KV hit rate / late or useful prefetch mean here?* →
   [01-design.md, §5](01-design.md) (and `pitlane/metrics.py` for the code)
 - *Which env vars do I have to set?* → [01-design.md, §3](01-design.md), then
   [runbooks/common.env](runbooks/common.env)

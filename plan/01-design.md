@@ -85,6 +85,7 @@ KV_FORECAST_REDIS_URL=redis://127.0.0.1:6379/0
 BENCH_GPU=0
 BENCH_MIN_FREE_RAM_GB=260        # l1-size-gb 200 + margin
 BENCH_SERVER_READY_TIMEOUT_S=1800
+BENCH_PREFETCH_LEAD_MIN_S=0.1    # below this lead a phantom counts as late
 ```
 
 Everything else from the manual runbook (`MODEL_PROVIDER`, the four
@@ -164,7 +165,12 @@ arrival window.
 | **Query tokens** | `Σ num_prompt_tokens` — every prompt token the question sent to the server. The hit rate's denominator, as an absolute count. | request JSONL |
 | **Token hits** | `Σ num_local_cached_tokens` — how many of those were already in HBM. The hit rate's numerator, as an absolute count. | request JSONL |
 | **Total prefetches** | Count of phantoms issued for the question — one per `/v1/agents/prefetch` fan-out, i.e. `prefetch_only=true` rows. The denominator of the late %, reported as an absolute count so a small percentage of a handful of prefetches is not read as a small percentage of many. | `agent_prefetch.jsonl` + request JSONL |
-| **Late prefetch %** | Of the phantoms issued for the question (`prefetch_only=true` rows, one per `/v1/agents/prefetch` fan-out): late if the real request that consumes the prefix arrived before the phantom finished, `real.arrival_ts < phantom.finish_ts`. Reported as `late / total_prefetches`; `unused` (no consumer ever arrived) counted separately. | `agent_prefetch.jsonl` (issue time, total) + request JSONL (finish time) |
+| **Late prefetch %** | Of the phantoms issued for the question: late if it left too close in front of the request it warms to have bought anything, `consumer.arrival_ts - phantom.arrival_ts < BENCH_PREFETCH_LEAD_MIN_S`. Both stamps are the engine's own `arrival_ts` on the two request rows, so HTTP receipt and chat-template time cancel and what is left is the lead the prefetcher actually bought. `unused` (no consumer ever arrived) counted separately. → `late_prefetches`, `late_prefetch_pct` | request JSONL (this cell only) |
+| **Prefetch lead** | `consumer.arrival_ts - phantom.arrival_ts`, mean and min over the phantoms that had a consumer. The distribution behind the late %, and the thing to look at before choosing the threshold. → `prefetch_lead_mean_s`, `prefetch_lead_min_s`, threshold echoed as `prefetch_lead_min_threshold_s` | request JSONL |
+| **Max lead / min lead** | The two `/v1/echo` markers as the server stamped them: `max_lead_ts`, when the workflow oracle issued the warm, and `min_lead_ts`, when the graph runtime parsed the tool call naming the node — the earliest a real predictor could know. Recorded as the instants themselves. → `max_lead_ts`, `min_lead_ts` | `server.log` `/v1/echo` markers |
+| **Lead window** | `min_lead_ts - max_lead_ts` — how far ahead of a real predictor the oracle knew about this target. Computed from the two markers and referred to nothing else; request timestamps decide only *which* request a marker belongs to. → `lead_window_s` per request, `lead_window_mean_s` per cell | `server.log` `/v1/echo` markers |
+| **Useful prefetches** | Count of phantoms that put tokens in HBM which were not already there *and* whose tokens a real request then hit: `credited = min(consumer.num_local_cached_tokens, phantom.num_prompt_tokens) - phantom.num_local_cached_tokens`, floored to whole blocks, `credited > 0`. A phantom whose own prefix was already fully HBM-resident promoted nothing and is never useful, however large its consumer's hit. Absolute count, for the same reason **Total prefetches** is one. → `useful_prefetches` | request JSONL (this cell only) |
+| **Useful prefetch %** | `useful_prefetches / total_prefetches`. A phantom that had no consumer, or had not finished when its consumer arrived, cannot be useful; the remainder is the phantom that landed in time, added nothing, and was hit anyway. → `useful_prefetch_pct` | derived |
 | **Workflow output tokens** | `Σ num_generation_tokens` over the question's real requests — everything the workflow generated, the per-question total shown in the results header. Pinned replay decodes the recorded count exactly, so this must equal the recorded trace's total; a mismatch means the pin did not hold. | request JSONL (checked against the trace) |
 | **Scheduler occupancy** | Over the question's window, from the scheduler timeline: mean and max `num_running_reqs` / `num_waiting_reqs`, total `num_scheduled_reqs` and `num_new_scheduled_reqs` (admissions), plus preemptions. Says whether an arm's latency came from queueing rather than from cache behaviour. | `scheduler_engine0_*.jsonl` |
 
@@ -179,7 +185,80 @@ it to `num_prompt_tokens - num_cached_tokens` (`vllm/v1/metrics/stats.py:300`),
 i.e. tokens it had to compute. The tokens already in HBM are
 `num_local_cached_tokens`, so that is what the hit rate uses.
 
-Late prefetch, post `f47e7521b` (engine-side origination removed): phantoms now
+Min and max lead, and why these two alone come from the log. Every other
+metric here is read from a request row, and deliberately so. These two are not
+requests: they are client-side decision instants — the moment the graph runtime
+parsed the tool call naming the next node, and the moment the workflow oracle
+issued the warm — and nothing on the server would otherwise record them.
+Measuring them client-side would mean reconciling two processes' clocks to
+within the few hundred milliseconds being measured, which is exactly the
+precision two clocks do not have. So the client posts each one to `POST
+/v1/echo` and the server logs it against its own clock. That endpoint exists for
+this and nothing else.
+
+The reported value is the markers' own. `lead_window_s = min_lead_ts -
+max_lead_ts` is the interval the oracle knew about a target before a real
+predictor could have, and it needs no third reference point: both ends are
+echoes, on one clock, and the span between them is the quantity. Request
+timestamps are used only to decide which request a marker belongs to.
+
+Read it as the transferability of the result. An oracle arm whose
+`lead_window_mean_s` is near zero is not getting its advantage from lookahead —
+the graph runtime knew the same thing at the same time — and its numbers should
+survive being driven by a real predictor. A large window is the opposite
+warning, and says how much of the arm's benefit evaporates when the oracle goes
+away.
+
+Parsing is a grep for `echo: event=<name> agent_id=<id>` with the line's own
+timestamp; other echo events (`prefetch_skipped`, say) are ignored, and
+`lead_markers` counts what was matched so a silently missing marker stream shows
+up as a warning rather than as an absent column. Markers pair with the next
+request of the same `agent_id`, latest marker first, so a node that takes
+several turns gets the marker belonging to the turn rather than to an earlier
+one.
+
+Everything above is measured **per chat completion**, and the cell numbers are
+sums over those rows. Each request carries its own `job_id`, `agent_id`,
+`langgraph_node` and `seq` (its position on the wire, which is what joins the
+same prompt across arms under pinned replay -- `agent_id` alone repeats whenever
+a node takes more than one turn), alongside its `ttft_s`, `query_tokens`,
+`token_hits`, and the phantoms charged to it: `prefetches`, `late_prefetches`,
+`useful`, `credited_tokens`, `prefetch_lead_s`. A phantom is charged to the one
+request it warmed, so `useful_prefetches` at cell level is
+`sum(useful)` and nothing is derived twice.
+
+That is the level to aggregate *from*, later and however the question needs it.
+A cell-level hit rate says a run improved; the per-request rows say which node
+did, which is the difference between "13.5% hit rate" and "the three
+`researcher_tools` prefills are untouched and the whole gain is in compress".
+They land in `requests.csv` at the run root, one row per chat completion across
+every cell, and in `metrics.json` under `per_request` for the cell alone.
+
+Late prefetch, and why it is a lead test rather than an overlap test. The
+question a phantom has to answer is "did it leave early enough to matter", and
+that is `consumer.arrival_ts - phantom.arrival_ts` — the lead. Both stamps live
+on the request rows this cell already writes, one per `prefetch_only=true` row
+and one per real row, so the metric is a join on two variables and never a parse
+of the server log. `arrival_ts` is the engine's, on both sides, so the HTTP
+receipt and chat-template tokenisation that sit in front of each cancel out.
+
+There is no physical constant to pin the threshold to, so it is a knob
+(`BENCH_PREFETCH_LEAD_MIN_S` in `common.env`, default 0.1 s) and the lead
+distribution is
+reported beside the percentage. Read them together: a 0% late on a mean lead of
+90 ms, against seeded prefills that take on the order of a second, is not a
+healthy run — it is a run whose threshold is set below anything it could have
+caught.
+
+Late is not the gate on useful, and the two cross. **Useful prefetches** needs
+the blocks to have been resident when the consumer arrived,
+`consumer.arrival_ts >= phantom.finish_ts`, which is a different question from
+whether the lead was worth having. A millisecond-long LMCache promotion can be
+late by lead and still land in time to be hit; a seeded prefill needing ~1.2 s
+can clear the lead threshold with 200 ms and still not be there. So the residency
+check gates `useful` directly and is not reported as a metric of its own.
+
+Post `f47e7521b` (engine-side origination removed): phantoms now
 come only from a client calling `POST /v1/agents/prefetch`, so
 `agent_prefetch.jsonl` is the complete list and joins 1:1 with the
 `prefetch_only=true` rows — the metric no longer has to guess at drains the
@@ -203,6 +282,69 @@ client never saw. Two knock-ons:
   silently records zero prefetches. The collector fails the cell if
   `total_prefetches == 0` on that arm.
 
+Useful prefetch %, and why the phantom's own row is the whole test. A
+phantom is useful when it *added* HBM residency that a real request then hit.
+Both halves matter, and both are readable off this cell alone.
+
+The phantom's own `num_local_cached_tokens` is the measurement that makes this
+work: it is, by definition, how much of that prefix was **already in HBM at the
+moment the phantom ran**. Everything past it is what the phantom brought in —
+promoted from LMCache (`num_external_cached_tokens`) or prefilled outright
+(`num_computed_tokens`). So the credit for a phantom and the consumer that
+extends its prefix is
+
+```
+credited = min(consumer.num_local_cached_tokens, phantom.num_prompt_tokens)
+           - phantom.num_local_cached_tokens
+useful   = credited > 0
+```
+
+and the two ends of the range are exactly the cases to separate:
+
+- A phantom that was itself a full local hit (`num_local_cached_tokens ==
+  num_prompt_tokens`) pulled a prefix out of LMCache that HBM already held.
+  `credited <= 0`, not useful — no matter how large the consumer's hit is, that
+  hit was going to happen anyway.
+- A seeded phantom whose prefix nothing has ever computed has
+  `num_local_cached_tokens ~= 0`, prefills, and the consumer hits the whole
+  thing. `credited` is the prompt, and the phantom is the only reason those
+  blocks exist.
+
+Blocks, not tokens, are the unit APC matches on, so round both sides down to a
+multiple of `block_size` (16) before comparing; a `credited` of 1-15 tokens is a
+partial trailing block and is noise, not a hit.
+
+Two bookkeeping rules. A phantom with no consumer is `unused`, and one whose
+consumer arrived before it finished is `late` — neither can be useful, so
+`useful + late + unused <= total_prefetches` and the remainder is the phantom
+that landed in time, added nothing, and was hit anyway. And a React warm asks
+for `top_k` prefixes, so several phantoms name one consumer: credit the single
+phantom with the largest `credited` and count the others as the residual, or
+the same hit is banked `top_k` times.
+
+Useful is not the same as helpful, and this is the metric's one blind spot.
+Under `prefill_on_miss` a seeded phantom whose prefix LMCache cannot hold runs a
+real prefill, registers the blocks in APC, and the request arriving tens of
+milliseconds later hits them — maximal `credited`, for work the phantom itself
+just did while the request queued behind that same prefill. Measured on a
+1-question ODR run: `compress_research` hit 3168 of 3236 prompt tokens for
+**-199 ms** of TTFT, and `final_report_generation` hit 2240 of 2244 for
+**+17 ms**. Both score fully useful. Only one helped, and neither helped in
+proportion to its hit, because the saving is bounded by the phantom's lead over
+its consumer (88 ms and 51 ms) and not by what it cached.
+
+So print Useful prefetch % next to the per-request `delta TTFT` it is meant to
+explain, and read a high useful % with flat TTFT as the self-prefill case rather
+than as a win. Telling the two apart needs the phantom's finish time, which the
+server now logs directly: `agent_prefetch_start` / `agent_prefetch_end` (with
+`elapsed_ms`) from `vllm/v1/agent_prefetch/submitter.py`, on by default and
+switched by `VLLM_PREFETCH_LOG_SPANS`. Nothing else answers it — `kv_hbm_ttft`
+skips phantoms on purpose, since
+`NodeEvictionController.on_request_finished` gates on
+`ttft_chat_completions_only` so the policy's own warming traffic cannot flatter
+its own average, and the HTTP access line is the submit rather than the finish
+because the endpoint answers `wait=false`.
+
 Scheduler occupancy comes from a file that did not exist before this plan:
 `FileStatLogger` now also writes `scheduler_engine<idx>_<ts>.jsonl` into
 `VLLM_REQUEST_STATS_DIR`, one sample per engine step carrying
@@ -225,7 +367,7 @@ Layout:
 
 ```
 $BENCH_ROOT/<run_id>/
-  state.json  results.csv  summary.md  resources.csv  env.redacted
+  state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
   <arm>/<question_id>/rep<k>/
       metrics.json  server.log  workflow.log
       stats/finished_requests_engine0_*.jsonl
@@ -233,8 +375,10 @@ $BENCH_ROOT/<run_id>/
       divergence.jsonl  agent_prefetch.jsonl
 ```
 
-`results.csv` is one row per cell; `summary.md` pivots it into one table per
-question, a row per arm, with the question's total tokens in the header.
+`results.csv` is one row per cell and `requests.csv` one row per chat completion
+(with `arm` / `question_id` / `rep` prefixed, so it is groupable on its own);
+`summary.md` pivots `results.csv` into one table per question, a row per arm,
+with the question's total tokens in the header.
 
 ---
 
