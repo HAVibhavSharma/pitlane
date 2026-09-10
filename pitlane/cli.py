@@ -20,10 +20,18 @@ from pitlane import metrics as metrics_mod
 from pitlane import preflight, report, runner
 from pitlane.config import Config, ConfigError
 
-_PLAN = Path(__file__).resolve().parents[1] / "plan"
-# Secrets first, then the shared config that ships with the runbooks, so a
-# by-hand run and an automated one read the same file.
-DEFAULT_ENV_FILES = [Path.home() / ".bench.env", _PLAN / "runbooks" / "common.env"]
+_ROOT = Path(__file__).resolve().parents[1]
+_PLAN = _ROOT / "plan"
+# Read in increasing order of precedence -- `Config.load` applies each file over
+# the last. Secrets, then the shared config that ships with the runbooks so a
+# by-hand run and an automated one read the same defaults, then this box's own
+# `.env`, which is the file the operator actually edits and therefore wins.
+# A missing file is skipped, so none of the three is required.
+DEFAULT_ENV_FILES = [
+    Path.home() / ".bench.env",
+    _PLAN / "runbooks" / "common.env",
+    _ROOT / ".env",
+]
 
 
 def _load_config(args: argparse.Namespace) -> Config:
