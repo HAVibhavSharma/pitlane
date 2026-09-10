@@ -43,9 +43,13 @@ def load_env_file(path: Path) -> dict[str, str]:
             parts = shlex.split(raw, comments=True)
         except ValueError:
             continue
-        if not parts:
-            continue
-        values[name] = os.path.expandvars(parts[0])
+        # `FOO=` is an assignment to the empty string, not the absence of one.
+        # Skipping it would mean a blank key in a later file cannot clear a
+        # value an earlier file set -- and blank is exactly how a template says
+        # "unset", so `LMCACHE_L2_DIR=` in `.env` would silently keep
+        # common.env's path and the run would use a disk tier it was told not
+        # to. Callers that treat "" as unset use `_or`.
+        values[name] = os.path.expandvars(parts[0]) if parts else ""
     return values
 
 
