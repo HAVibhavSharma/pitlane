@@ -25,6 +25,7 @@ _COLUMNS = [
     "useful_prefetches", "useful_prefetch_pct",
     "prefetch_lead_mean_s", "prefetch_lead_min_s",
     "prefetch_lead_min_threshold_s", "lead_window_mean_s", "lead_markers",
+    "tool_seconds", "unmatched_tool_markers",
     "sched_running_mean", "sched_running_max", "sched_waiting_mean", "sched_waiting_max",
     "sched_scheduled_total", "sched_admissions_total", "sched_preempted_total",
     "requests", "wall_clock_s", "trace_misses", "off_pin_requests",
@@ -151,6 +152,22 @@ def append_prefetch_rows(prefetches_csv: Path, metrics: Metrics) -> None:
     no sampling step, so there is no decode phase to have taken zero seconds.
     """
     _append(prefetches_csv, _PREFETCH_COLUMNS, _scope(metrics), metrics.per_prefetch)
+
+
+_TOOL_COLUMNS = [
+    "arm", "question_id", "rep", "agent_id", "tool", "call_id",
+    "start_ts", "end_ts", "elapsed_s",
+]
+
+
+def append_tool_rows(tools_csv: Path, metrics: Metrics) -> None:
+    """One row per leaf tool call, paired from the `/v1/echo` markers.
+
+    `researcher_tools` only: the supervisor's `ConductResearch` spawns subgraphs
+    whose work is already on the timeline as chat completions, and never reaches
+    the instrumented helper.
+    """
+    _append(tools_csv, _TOOL_COLUMNS, _scope(metrics), metrics.per_tool)
 
 
 def _scope(metrics: Metrics) -> dict[str, Any]:

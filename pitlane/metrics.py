@@ -45,11 +45,17 @@ LEAD_MIN_S = 0.1
 # on its own timeline, which is the same clock `arrival_ts` is on.
 #
 #   echo: event=max_lead agent_id=langgraph:1:...:supervisor issuer=workflow ...
+#
+# The tail is parsed as `key=value` pairs rather than matched field by field,
+# because the markers carry different fields per event -- `call_id` and `tool`
+# on a tool span, `route` on a warm -- and a regex per shape would need editing
+# every time a call site adds one.
 _ECHO_LINE = re.compile(
-    r"(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*?"
-    r"echo: event=(?P<event>\w+) agent_id=(?P<agent>\S+)"
+    r"(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*?echo: (?P<body>.*)$"
 )
+_ECHO_FIELD = re.compile(r"(\w+)=(\S+)")
 _LEAD_EVENTS = ("min_lead", "max_lead")
+_TOOL_EVENTS = ("tool_start", "tool_end")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -72,6 +78,18 @@ def _read_glob(directory: Path, pattern: str) -> list[dict[str, Any]]:
     for path in sorted(directory.glob(pattern)):
         rows.extend(_read_jsonl(path))
     return rows
+
+
+def _echo_fields(line: str) -> tuple[float, dict[str, str]] | None:
+    """One echo line as `(server timestamp, fields)`, or None if it is not one."""
+    match = _ECHO_LINE.search(line)
+    if not match:
+        return None
+    try:
+        stamp = datetime.strptime(match["ts"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    except ValueError:
+        return None
+    return stamp, dict(_ECHO_FIELD.findall(match["body"]))
 
 
 def _interval(value: Any) -> float | None:
@@ -203,6 +221,11 @@ class Metrics:
     # engine `arrival_ts` / `finish_ts`, which is where `agent_prefetch_start` /
     # `agent_prefetch_end` in the server log get their instants from anyway.
     per_prefetch: list[dict[str, Any]] = field(default_factory=list)
+    # Leaf tool spans from the `/v1/echo` markers: the CPU and I/O between model
+    # calls, which no request row records because a tool call is not a request.
+    per_tool: list[dict[str, Any]] = field(default_factory=list)
+    tool_seconds: float = 0.0
+    unmatched_tool_markers: int = 0
     wall_clock_s: float | None = None
     trace_misses: int = 0
     off_pin_requests: int = 0
@@ -265,6 +288,7 @@ def collect(
     _requests(metrics, real)
     _prefetch(metrics, cell, phantom, real, lead_min_s)
     _lead_markers(metrics, cell, real)
+    _tool_spans(metrics, cell)
     _scheduler(metrics, stats_dir, t0, t1)
     _divergence(metrics, cell / "divergence.jsonl")
     return metrics
@@ -499,16 +523,15 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
         by_agent.setdefault(row.get("agent_id"), []).append(row)
 
     for line in log.read_text(errors="replace").splitlines():
-        match = _ECHO_LINE.search(line)
-        if not match or match["event"] not in _LEAD_EVENTS:
+        parsed = _echo_fields(line)
+        if parsed is None:
             continue
-        try:
-            stamp = datetime.strptime(match["ts"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
-        except ValueError:
+        stamp, fields = parsed
+        if fields.get("event") not in _LEAD_EVENTS:
             continue
         metrics.lead_markers += 1
         consumer = next(
-            (r for r in by_agent.get(match["agent"], [])
+            (r for r in by_agent.get(fields.get("agent_id"), [])
              if (r.get("arrival_ts") or 0.0) >= stamp),
             None,
         )
@@ -517,7 +540,7 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
         entry = entry_of[id(consumer)]
         # The latest marker of each kind before the request wins: for a repeated
         # node that is the one belonging to this turn rather than an earlier one.
-        field_name = f"{match['event']}_ts"
+        field_name = f"{fields['event']}_ts"
         if entry[field_name] is None or stamp > entry[field_name]:
             entry[field_name] = stamp
 
@@ -543,6 +566,70 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
         metrics.warnings.append(
             f"{metrics.lead_markers} /v1/echo lead marker(s) matched no request; "
             "agent_id mismatch or markers outside the question window"
+        )
+
+
+def _tool_spans(metrics: Metrics, cell: Path) -> None:
+    """Pair `tool_start` / `tool_end` markers into one span per tool call.
+
+    Paired on `call_id`, which is the tool call's own id -- the same discipline
+    the phantom spans get from `req=prefetch::...`, and for the same reason:
+    three tools run concurrently under one `asyncio.gather`, so anything
+    weaker than an explicit id would interleave them.
+
+    Only `researcher_tools` reaches the instrumented helper, so these are leaf
+    tools -- search, MCP, `think_tool`. The supervisor's `ConductResearch`
+    cannot appear here, which is deliberate: it is tens of seconds of chat
+    completions already on the timeline, and counting it as a tool span would
+    double-count the researcher's own work.
+    """
+    log = cell / "server.log"
+    if not log.exists():
+        return
+
+    open_spans: dict[str, tuple[float, dict[str, str]]] = {}
+    for line in log.read_text(errors="replace").splitlines():
+        parsed = _echo_fields(line)
+        if parsed is None:
+            continue
+        stamp, fields = parsed
+        event = fields.get("event")
+        if event not in _TOOL_EVENTS:
+            continue
+        call_id = fields.get("call_id")
+        if not call_id:
+            metrics.unmatched_tool_markers += 1
+            continue
+        if event == "tool_start":
+            open_spans[call_id] = (stamp, fields)
+            continue
+        started = open_spans.pop(call_id, None)
+        if started is None:
+            # An end with no start: the log was truncated, or the run began
+            # mid-tool. Counted rather than dropped silently.
+            metrics.unmatched_tool_markers += 1
+            continue
+        begin, opening = started
+        metrics.per_tool.append({
+            "agent_id": opening.get("agent_id") or fields.get("agent_id"),
+            "tool": opening.get("tool") or fields.get("tool"),
+            "call_id": call_id,
+            "start_ts": begin,
+            "end_ts": stamp,
+            # From the two server stamps, not from the client's own
+            # `elapsed_ms`: one clock for every span on the timeline.
+            "elapsed_s": max(stamp - begin, 0.0),
+        })
+
+    # A start with no end is a tool that never returned -- or, far more often, a
+    # window that closed mid-call. Either way the span is unknown, not zero.
+    metrics.unmatched_tool_markers += len(open_spans)
+    metrics.per_tool.sort(key=lambda row: row["start_ts"])
+    metrics.tool_seconds = sum(row["elapsed_s"] for row in metrics.per_tool)
+    if metrics.unmatched_tool_markers:
+        metrics.warnings.append(
+            f"{metrics.unmatched_tool_markers} unpaired tool marker(s); "
+            "tool time is under-counted for this cell"
         )
 
 

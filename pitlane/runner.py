@@ -82,6 +82,7 @@ def run_cell(
     report.append_row(config.run_dir / "results.csv", collected)
     report.append_request_rows(config.run_dir / "requests.csv", collected)
     report.append_prefetch_rows(config.run_dir / "prefetches.csv", collected)
+    report.append_tool_rows(config.run_dir / "tools.csv", collected)
     timeline.write(config.run_dir / "timelines", collected)
     report.write_summary(config.run_dir)
 

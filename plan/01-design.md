@@ -187,6 +187,7 @@ arrival window.
 | **Prefetch lead** | `consumer.arrival_ts - phantom.arrival_ts`, mean and min over the phantoms that had a consumer. The distribution behind the late %, and the thing to look at before choosing the threshold. → `prefetch_lead_mean_s`, `prefetch_lead_min_s`, threshold echoed as `prefetch_lead_min_threshold_s` | request JSONL |
 | **Max lead / min lead** | The two `/v1/echo` markers as the server stamped them: `max_lead_ts`, when the workflow oracle issued the warm, and `min_lead_ts`, when the graph runtime parsed the tool call naming the node — the earliest a real predictor could know. Recorded as the instants themselves. → `max_lead_ts`, `min_lead_ts` | `server.log` `/v1/echo` markers |
 | **Lead window** | `min_lead_ts - max_lead_ts` — how far ahead of a real predictor the oracle knew about this target. Computed from the two markers and referred to nothing else; request timestamps decide only *which* request a marker belongs to. → `lead_window_s` per request, `lead_window_mean_s` per cell | `server.log` `/v1/echo` markers |
+| **Tool time** | Leaf tool spans from the `/v1/echo` `tool_start` / `tool_end` markers, paired on the tool call's own `call_id`. `researcher_tools` only — the supervisor dispatches `think_tool` inline and `ConductResearch` through `researcher_subgraph.ainvoke`, so neither reaches the instrumented helper. → `per_tool` rows, `tool_seconds`, `unmatched_tool_markers` | `server.log` `/v1/echo` markers |
 | **Useful prefetches** | Count of phantoms that put tokens in HBM which were not already there *and* whose tokens a real request then hit: `credited = min(consumer.num_local_cached_tokens, phantom.num_prompt_tokens) - phantom.num_local_cached_tokens`, floored to whole blocks, `credited > 0`. A phantom whose own prefix was already fully HBM-resident promoted nothing and is never useful, however large its consumer's hit. Absolute count, for the same reason **Total prefetches** is one. → `useful_prefetches` | request JSONL (this cell only) |
 | **Useful prefetch %** | `useful_prefetches / total_prefetches`. A phantom that had no consumer, or had not finished when its consumer arrived, cannot be useful; the remainder is the phantom that landed in time, added nothing, and was hit anyway. → `useful_prefetch_pct` | derived |
 | **Workflow output tokens** | `Σ num_generation_tokens` over the question's real requests — everything the workflow generated, the per-question total shown in the results header. Pinned replay decodes the recorded count exactly, so this must equal the recorded trace's total; a mismatch means the pin did not hold. | request JSONL (checked against the trace) |
@@ -234,6 +235,32 @@ up as a warning rather than as an absent column. Markers pair with the next
 request of the same `agent_id`, latest marker first, so a node that takes
 several turns gets the marker belonging to the turn rather than to an earlier
 one.
+
+Tool spans, and why they are the second thing read from the log. A tool call
+is not a request, so no row records it — the CPU and I/O between model calls is
+otherwise a gap on the timeline with nothing in it. `execute_tool_safely`
+(`deep_researcher.py`) brackets each call with `tool_start` / `tool_end` markers
+carrying the tool call's own id, and the markers go through `/v1/echo` so the
+spans land on the same clock as `arrival_ts` rather than on the workflow
+process's. Posting is fire-and-forget on the marker executor, so the
+instrumentation stays off the path it is measuring. `ODR_TOOL_MARKERS=0` turns
+it off.
+
+Pairing is on `call_id` and nothing weaker. Three tools run concurrently under
+one `asyncio.gather`, so their markers interleave and matching by agent id or by
+order would cross the spans. `tool_end` is emitted from a `finally`, so a tool
+that raises still closes its span; a `tool_start` with no end is counted in
+`unmatched_tool_markers` and warned about rather than dropped, because the span
+is then unknown rather than zero and tool time is under-counted for that cell.
+
+Only leaf tools appear, and that is the point. `ConductResearch` is tens of
+seconds of chat completions already on the timeline, so drawing it as a tool bar
+would double-count the researcher's own work; it cannot appear here because that
+path never calls the instrumented helper. Two things to know when reading the
+numbers: `think_tool` and `ResearchComplete` do go through the helper and are
+near-zero work, so they show as sub-millisecond bars; and under pinned replay
+search is served from `TAVILY_CACHE_DIR`, so a `tavily_search` span is
+cache-read time, not the API latency a live arm would pay.
 
 Everything above is measured **per chat completion**, and the cell numbers are
 sums over those rows. Each request carries its own `job_id`, `agent_id`,
@@ -387,6 +414,7 @@ Layout:
 $BENCH_ROOT/<run_id>/
   state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
   prefetches.csv                              one row per phantom
+  tools.csv                                   one row per leaf tool call
   timelines/<arm>__<question_id>__rep<k>.mmd   Mermaid Gantt of the cell
   timelines/<arm>__<question_id>__rep<k>.md    per-call table + counts
   <arm>/<question_id>/rep<k>/
@@ -397,8 +425,10 @@ $BENCH_ROOT/<run_id>/
 ```
 
 `timelines/` is the shape the tables cannot show: one Mermaid Gantt per cell,
-one section per agent id, `:crit` (orange) for a phantom and `:active` (blue)
-for a chat completion. Built from the same request rows as everything else --
+one section per agent id, `:crit` (orange) for a phantom, `:active` (blue)
+for a chat completion and `:done` (green) for a leaf tool span. Three is the
+ceiling: Mermaid has four task styles and the fourth, `milestone`, renders as a
+point rather than a bar. Built from the same request rows as everything else --
 `agent_prefetch_start` / `agent_prefetch_end` take their instants from the
 engine, and the engine already writes them as `arrival_ts` / `finish_ts` on the
 phantom's own row, so reading the log back would be a lossier route to the same

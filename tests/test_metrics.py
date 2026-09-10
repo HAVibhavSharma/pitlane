@@ -370,6 +370,69 @@ def build_timeline_cell(tmp: Path) -> Path:
     return cell
 
 
+# Two concurrent tools plus a `tool_start` whose end never came, in the shape
+# `echo_router._format` emits. `t2` and `t3` overlap on purpose: they run under
+# one `asyncio.gather`, so only `call_id` can tell them apart.
+TOOL_LOG_TEMPLATE = """\
+(APIServer pid=1) INFO {t0} [echo_router.py:80] echo: \
+event=tool_start agent_id={agent} call_id=call_a client_ns=1 tool=tavily_search
+(APIServer pid=1) INFO {t1} [echo_router.py:80] echo: \
+event=tool_start agent_id={agent} call_id=call_b client_ns=2 tool=tavily_search
+(APIServer pid=1) INFO {t2} [echo_router.py:80] echo: \
+event=tool_end agent_id={agent} call_id=call_b client_ns=3 elapsed_ms=412.0 tool=tavily_search
+(APIServer pid=1) INFO {t3} [echo_router.py:80] echo: \
+event=tool_end agent_id={agent} call_id=call_a client_ns=4 elapsed_ms=980.0 tool=tavily_search
+(APIServer pid=1) INFO {t3} [echo_router.py:80] echo: \
+event=tool_start agent_id={agent} call_id=call_c client_ns=5 tool=think_tool
+"""
+
+
+def check_tool_spans(tmp: Path) -> None:
+    """Leaf tool spans pair on `call_id`, and an unpaired marker is reported."""
+    from pitlane import timeline
+    import datetime as _dt
+
+    cell = build_timeline_cell(tmp / "tools")
+    rows = _read(cell / "stats" / "finished_requests_engine0_x.jsonl")
+    tools_agent = "langgraph:1:research_supervisor:supervisor_tools:researcher_tools"
+    base = next(r["arrival_ts"] for r in rows if r["agent_id"] == tools_agent)
+
+    def stamp(offset: float) -> str:
+        return _dt.datetime.fromtimestamp(base + offset).strftime(
+            "%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    (cell / "server.log").write_text(TOOL_LOG_TEMPLATE.format(
+        agent=tools_agent, t0=stamp(0.1), t1=stamp(0.2),
+        t2=stamp(0.612), t3=stamp(1.08)))
+
+    m = metrics.collect(cell, arm="ours", question_id="q6", t0=T0, t1=T0 + 100)
+    by_call = {row["call_id"]: row for row in m.per_tool}
+    assert set(by_call) == {"call_a", "call_b"}, sorted(by_call)
+    # Interleaved ends: `call_b` closes first, so only the id can pair them.
+    assert abs(by_call["call_a"]["elapsed_s"] - 0.98) < 2e-3, by_call["call_a"]
+    assert abs(by_call["call_b"]["elapsed_s"] - 0.412) < 2e-3, by_call["call_b"]
+    assert by_call["call_a"]["tool"] == "tavily_search"
+    # `call_c` opened and never closed: counted, not silently dropped.
+    assert m.unmatched_tool_markers == 1, m.unmatched_tool_markers
+    assert any("unpaired tool marker" in w for w in m.warnings), m.warnings
+    assert abs(m.tool_seconds - 1.392) < 4e-3, m.tool_seconds
+
+    ordered = timeline.events(m)
+    tools = [e for e in ordered if e.kind == "tool"]
+    assert [e.index for e in tools] == [1, 2]
+    assert "tavily_search" in tools[0].label and "ms)" in tools[0].label
+    body = timeline.mermaid(m)
+    assert body.count(":done,") == 2, body
+    assert "doneTaskBkgColor" in body
+    ids = [ln.split(",")[1].strip() for ln in body.splitlines()
+           if any(f":{t}," in ln for t in ("crit", "active", "done"))]
+    assert len(ids) == len(set(ids)), ids
+    assert "leaf tool calls: **2**" in timeline.table(m)
+    print("tool spans:", len(m.per_tool), "paired,",
+          m.unmatched_tool_markers, "unpaired, %.3fs total" % m.tool_seconds)
+    print("\nall tool-span assertions passed")
+
+
 def check_timeline(tmp: Path) -> None:
     from pitlane import timeline
 
@@ -421,3 +484,4 @@ if __name__ == "__main__":
         check_poisoned_intervals(Path(tmp))
         check_lead_markers(Path(tmp))
         check_timeline(Path(tmp))
+        check_tool_spans(Path(tmp))
