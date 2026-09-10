@@ -105,6 +105,24 @@ def _paths(config: Config) -> list[Check]:
     return checks
 
 
+def _venv_key(arm: str) -> str:
+    """The `Paths.venvs` entry an arm actually launches from.
+
+    Not the arm's own name. Several arms share one build -- `record` is the
+    baseline stack with tracing on -- so `Arm.venv` names the entry, defaulting
+    to the arm's `repo`. Checking `venvs[arm_name]` instead reports a key that
+    was never meant to exist and sends the operator off to set an environment
+    variable nothing reads.
+    """
+    try:
+        from pitlane import arms as arms_mod
+
+        arm_def = arms_mod.load().arms.get(arm)
+    except Exception:  # noqa: BLE001 - a preflight check must not raise
+        arm_def = None
+    return (arm_def.venv if arm_def and arm_def.venv else arm) or arm
+
+
 def _venvs(config: Config, arm: str | None) -> list[Check]:
     """Each arm's virtualenv, and the workflow's.
 
@@ -114,18 +132,19 @@ def _venvs(config: Config, arm: str | None) -> list[Check]:
     numbers, and compares a stack against itself.
     """
     checks: list[Check] = []
-    wanted = [arm] if arm else sorted(config.paths.vllm_repos)
+    wanted = [_venv_key(arm)] if arm else sorted(config.paths.vllm_repos)
     for name in wanted:
+        label = f"venv [{name}]" + (f" (for {arm})" if arm and arm != name else "")
         venv = config.paths.venvs.get(name)
         if venv is None:
             checks.append(Check(
-                f"venv [{name}]", False,
+                label, False,
                 f"unset; `vllm` will resolve on PATH -- set VLLM_{name.upper()}_VENV",
                 fatal=False,
             ))
             continue
         binary = venv / "bin" / "vllm"
-        checks.append(Check(f"venv [{name}]", binary.exists(), str(binary)))
+        checks.append(Check(label, binary.exists(), str(binary)))
     venv = config.paths.workflow_venv
     if venv is None:
         checks.append(Check(
