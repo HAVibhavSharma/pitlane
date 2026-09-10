@@ -45,7 +45,7 @@ boot is a config flag, not the default.
 | `preflight` | GPU 0 free (`nvidia-smi`: no other process, free VRAM ≥ threshold), host RAM free ≥ `l1-size-gb` + margin, `/disk2` free space, port 8000 unbound, redis reachable (arm `ours` only). Hard-fails before anything starts. |
 | `resource_monitor` | Samples GPU util/mem, host RAM, disk every ~5 s into `resources.csv` for the whole run; kills the run if RAM or VRAM crosses the abort threshold. |
 | `tmux_supervisor` | Fixed session names (`lmcache`, `vllm_baseline`, `vllm_continuum`, `vllm_ours`, `workflow`). Create / kill / send-keys / `capture-pane -pJ` / wait-for-exit-sentinel. Idle sessions from a crashed run are reaped at start. |
-| `lmcache_manager` | **Wipe and restart are one atomic operation**: stop the running LMCache server, delete `$LMCACHE_L2_DIR`, start it again, wait for the port. Never one without the other — the server's L1 index is in memory, so wiping the dir under a live server leaves it serving keys whose backing files are gone, and restarting without wiping carries the previous cell's L2 in. Skipped for `continuum` (that arm uses `LMCACHE_CONFIG_FILE` + `LMCacheConnectorV1`, no separate server). |
+| `lmcache_manager` | **Wipe and restart are one atomic operation**: stop the running LMCache server, delete `$LMCACHE_L2_DIR`, start it again, wait for the port. Never one without the other — the server's L1 index is in memory, so wiping the dir under a live server leaves it serving keys whose backing files are gone, and restarting without wiping carries the previous cell's L2 in. Blank `LMCACHE_L2_DIR` omits `--l2-adapter` entirely and LMCache runs L1-only, where the restart alone is the wipe. Skipped for `continuum` (that arm uses `LMCACHE_CONFIG_FILE` + `LMCacheConnectorV1`, no separate server). |
 | `server_manager` | Launches the arm's `vllm serve` from the arm's repo dir with its env overlay, redirecting to the arm's log (`test.log` / `test_cont.log` / `test_our.log`), then **readiness-gates** on `GET /v1/models` (plus `/health`) with a timeout, tailing the log for fatal patterns so a dead boot fails fast instead of at the timeout. |
 | `workflow_runner` | Builds the full env (`.env` + arm overlay + per-question overrides), runs the adapter's command in the `workflow` session, streams to `workflow.log`, waits on exit code. |
 | `question_selector` | Resolves the question set (index or id) from the benchmark the workflow uses; keeps question identity stable across arms so cells line up. |
@@ -82,7 +82,7 @@ WORKFLOW_VENV=/home/vibhav/venvs/odr
 BENCH_ROOT=/disk2/vibhav/bench                          # all run artifacts
 ODR_TRACE_DIR=/disk2/vibhav/traces
 TAVILY_CACHE_DIR=/disk2/vibhav/tavily_cache
-LMCACHE_L2_DIR=/disk2/vibhav/lmcache                    # wiped per start
+LMCACHE_L2_DIR=/disk2/vibhav/lmcache                    # wiped per start; blank = L1 only
 
 # --- knobs that change what is measured ---
 MODEL_NAME=Qwen/Qwen2.5-72B-Instruct-AWQ
@@ -131,7 +131,7 @@ for question q in Q:            # isolated-prompt mode
 
 **setup(arm)**
 1. Kill leftover sessions.
-2. `baseline` / `ours`: **stop LMCache → wipe `$LMCACHE_L2_DIR` → start LMCache → wait for port** (one step; never wipe under a live server). `continuum`: skip.
+2. `baseline` / `ours`: **stop LMCache → wipe `$LMCACHE_L2_DIR` → start LMCache → wait for port** (one step; never wipe under a live server). With `LMCACHE_L2_DIR` blank there is no disk tier and the stop/start is the whole wipe. `continuum`: skip.
 3. Start the arm's vLLM in its own tmux session, log to the arm's log file.
 4. Poll `/v1/models` until ready (or fail on log error pattern / timeout).
 5. `POST /v1/kv_metrics/reset`; note stats-file offset and wall-clock `t0`.

@@ -50,17 +50,30 @@ def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
     The L1 index is in memory and the L2 store is on disk. Wiping the disk
     under a live server leaves it serving keys whose backing files are gone;
     restarting without wiping carries the previous cell's cache into this one.
+
+    With `LMCACHE_L2_DIR` unset there is no disk tier: `--l2-adapter` is
+    omitted, LMCache keeps its whole store in L1, and the restart alone is the
+    wipe. That is a smaller change to what is measured than it sounds -- L1 is
+    the 200 GB of CPU memory that serves `external_hit_tokens`, and L2 only
+    holds what spills past it, which a question of a few tens of thousands of
+    prompt tokens never reaches. It does mean nothing survives a restart, so
+    an arm that wants a warm cache across cells needs the disk tier.
     """
     tmux.kill(LMCACHE_SESSION)
     _wait_port_free(config.lmcache_port, timeout_s=60)
 
     target = config.paths.lmcache_l2_dir
-    if target.exists():
-        shutil.rmtree(target)
-        logger.info("wiped LMCache L2 dir %s", target)
-    target.mkdir(parents=True, exist_ok=True)
+    adapter_arg = ""
+    if target is not None:
+        if target.exists():
+            shutil.rmtree(target)
+            logger.info("wiped LMCache L2 dir %s", target)
+        target.mkdir(parents=True, exist_ok=True)
+        adapter = json.dumps({"type": "fs", "base_path": str(target)})
+        adapter_arg = f" --l2-adapter {shlex.quote(adapter)}"
+    else:
+        logger.info("LMCACHE_L2_DIR unset; running LMCache with L1 only")
 
-    adapter = json.dumps({"type": "fs", "base_path": str(target)})
     command = (
         "LMCACHE_LOG_KV_HASH=1 lmcache server"
         f" --l1-size-gb {l1_size_gb}"
@@ -68,7 +81,7 @@ def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
         " --chunk-size 16"
         " --host 0.0.0.0"
         f" --port {config.lmcache_port}"
-        f" --l2-adapter {shlex.quote(adapter)}"
+        f"{adapter_arg}"
     )
     tmux.start(LMCACHE_SESSION, command)
     _wait_port_open(config.lmcache_port, timeout_s=120)

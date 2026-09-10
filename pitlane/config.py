@@ -57,7 +57,11 @@ class ConfigError(RuntimeError):
 class Paths:
     bench_root: Path
     trace_dir: Path
-    lmcache_l2_dir: Path
+    # Optional: unset runs LMCache with L1 only (its 200 GB of CPU memory) and
+    # no disk tier below it. `--l2-adapter` is repeatable and defaults to an
+    # empty list, and LMCache's storage manager guards every L2 path on the
+    # list being non-empty, so nothing has to be stubbed out.
+    lmcache_l2_dir: Path | None
     tavily_cache_dir: Path
     vllm_log_dir: Path
     workflow_repo: Path
@@ -137,7 +141,10 @@ class Config:
         paths = Paths(
             bench_root=Path(env.get("BENCH_ROOT", "/disk2/vibhav/bench")),
             trace_dir=Path(need("TRACE_DIR")),
-            lmcache_l2_dir=Path(need("LMCACHE_L2_DIR")),
+            lmcache_l2_dir=(
+                Path(value) if (value := env.get("LMCACHE_L2_DIR", "").strip())
+                else None
+            ),
             tavily_cache_dir=Path(env.get("TAVILY_CACHE_DIR", "")),
             vllm_log_dir=Path(env.get("VLLM_LOG_DIR", "")),
             workflow_repo=Path(need("WORKFLOW_REPO")),
