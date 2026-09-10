@@ -51,7 +51,7 @@ def run_cell(
     # no ports, no waiting on a server that was never asked to start.
     if not dry_run and not reuse_stack:
         if arm.lmcache_server:
-            stack.restart_lmcache(config)
+            stack.restart_lmcache(config, arm)
         else:
             # Continuum drives LMCache in-process; a stray server on 10903
             # would be a second, invisible cache tier.

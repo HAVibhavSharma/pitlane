@@ -123,6 +123,46 @@ def _venv_key(arm: str) -> str:
     return (arm_def.venv if arm_def and arm_def.venv else arm) or arm
 
 
+def _lmcache(config: Config, arm: str | None) -> list[Check]:
+    """The LMCache server binary, for the arms that launch one.
+
+    Was checked only as a free port, which says nothing about whether anything
+    can bind it. LMCache is a third process with a third install, started in
+    its own tmux session, and until it was given a venv it resolved `lmcache`
+    on whatever PATH that session inherited -- the same failure the vLLM
+    launcher had, one process over.
+
+    Skipped for an arm that runs no server: `continuum` drives LMCache in
+    process through `LMCacheConnectorV1`, so there is no binary to find.
+    """
+    try:
+        from pitlane import arms as arms_mod
+        from pitlane import stack as stack_mod
+
+        registry = arms_mod.load()
+    except Exception:  # noqa: BLE001 - a preflight check must not raise
+        return []
+
+    wanted = [arm] if arm else sorted(registry.arms)
+    checks: list[Check] = []
+    for name in wanted:
+        arm_def = registry.arms.get(name)
+        if arm_def is None or not arm_def.lmcache_server:
+            continue
+        venv = stack_mod.lmcache_venv(config, arm_def)
+        if venv is None:
+            checks.append(Check(
+                f"lmcache [{name}]", False,
+                "no venv resolved; `lmcache` will come from PATH -- set "
+                "LMCACHE_VENV, or the arm's own VLLM_*_VENV",
+                fatal=False,
+            ))
+            continue
+        binary = venv / "bin" / "lmcache"
+        checks.append(Check(f"lmcache [{name}]", binary.exists(), str(binary)))
+    return checks
+
+
 def _venvs(config: Config, arm: str | None) -> list[Check]:
     """Each arm's virtualenv, and the workflow's.
 
@@ -168,6 +208,7 @@ def run(config: Config, arm: str | None = None) -> list[Check]:
         _disk_free(config.paths.bench_root),
         *_paths(config),
         *_venvs(config, arm),
+        *_lmcache(config, arm),
     ]
     if arm == "ours":
         checks.append(_redis(config.redis_url))

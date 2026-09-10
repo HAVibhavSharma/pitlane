@@ -44,7 +44,23 @@ class StackError(RuntimeError):
 
 
 # -- LMCache ---------------------------------------------------------------
-def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
+def lmcache_venv(config: Config, arm: Arm | None = None) -> Path | None:
+    """Where `lmcache` is installed: its own venv, else the arm's own.
+
+    Falling back to the arm's venv is right more often than PATH is -- vLLM
+    imports LMCache for the connector, so a build's environment already has a
+    compatible server -- but `LMCACHE_VENV` exists because "usually" is not
+    "always" and a shared server may be installed once elsewhere.
+    """
+    if config.paths.lmcache_venv is not None:
+        return config.paths.lmcache_venv
+    if arm is not None:
+        return config.paths.venvs.get(arm.venv or arm.repo)
+    return None
+
+
+def restart_lmcache(config: Config, arm: Arm | None = None, *,
+                    l1_size_gb: int = 200) -> None:
     """Stop, wipe, start -- in that order, always together.
 
     The L1 index is in memory and the L2 store is on disk. Wiping the disk
@@ -62,6 +78,7 @@ def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
     tmux.kill(LMCACHE_SESSION)
     _wait_port_free(config.lmcache_port, timeout_s=60)
 
+    venv = lmcache_venv(config, arm)
     target = config.paths.lmcache_l2_dir
     adapter_arg = ""
     if target is not None:
@@ -75,7 +92,8 @@ def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
         logger.info("LMCACHE_L2_DIR unset; running LMCache with L1 only")
 
     command = (
-        "LMCACHE_LOG_KV_HASH=1 lmcache server"
+        f"LMCACHE_LOG_KV_HASH=1 {shlex.quote(config_mod.venv_bin(venv, 'lmcache'))}"
+        " server"
         f" --l1-size-gb {l1_size_gb}"
         " --eviction-policy LRU"
         " --chunk-size 16"
@@ -83,7 +101,7 @@ def restart_lmcache(config: Config, *, l1_size_gb: int = 200) -> None:
         f" --port {config.lmcache_port}"
         f"{adapter_arg}"
     )
-    tmux.start(LMCACHE_SESSION, command)
+    tmux.start(LMCACHE_SESSION, command, env=config_mod.venv_env(venv))
     _wait_port_open(config.lmcache_port, timeout_s=120)
     logger.info("LMCache up on port %s", config.lmcache_port)
 

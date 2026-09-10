@@ -79,6 +79,7 @@ VLLM_BASELINE_VENV=/home/vibhav/venvs/baseline
 VLLM_CONTINUUM_VENV=/home/vibhav/venvs/continuum
 VLLM_OURS_VENV=/home/vibhav/venvs/ours
 WORKFLOW_VENV=/home/vibhav/venvs/odr
+LMCACHE_VENV=                    # blank: use the arm's own vLLM venv
 BENCH_ROOT=/disk2/vibhav/bench                          # all run artifacts
 ODR_TRACE_DIR=/disk2/vibhav/traces
 TAVILY_CACHE_DIR=/disk2/vibhav/tavily_cache
@@ -104,8 +105,12 @@ itself. `stack.start_server` invokes `<venv>/bin/vllm` by absolute path and sets
 `VIRTUAL_ENV` plus a `PATH` prefix for anything it spawns; `workflow.run` does
 the same with `<WORKFLOW_VENV>/bin/python`. An arm may override which entry it
 uses with `venv = "..."` in `arms.toml`, which otherwise defaults to its `repo`
-key. `pitlane preflight` reports each one and warns when it is unset, since
-falling back to `PATH` is a fallback and never the intent.
+key. The LMCache server is a third process with a third install, launched into its
+own tmux session: `LMCACHE_VENV` names its environment, and blank falls back to
+the arm's own vLLM venv, which is usually right because a build already imports
+LMCache for the connector. `pitlane preflight` reports each environment and the
+`lmcache` binary for the arms that launch one, and warns when a venv is unset,
+since falling back to `PATH` is a fallback and never the intent.
 
 Everything else from the manual runbook (`MODEL_PROVIDER`, the four
 `*_MODEL_MAX_TOKENS`, `LANGGRAPH_PROMPT_PSEUDO_DYNAMIC`, the

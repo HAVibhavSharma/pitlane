@@ -72,6 +72,10 @@ class Paths:
     # more than one it silently serves the same build every time.
     venvs: dict[str, Path] = field(default_factory=dict)
     workflow_venv: Path | None = None
+    # The LMCache server is a third process with a third install. Usually the
+    # same environment as one of the vLLM builds, but not necessarily -- so it
+    # is named rather than inferred, and falls back to the arm's own venv.
+    lmcache_venv: Path | None = None
 
 
 def _or(env: dict[str, str], key: str, default: str) -> str:
@@ -179,6 +183,9 @@ class Config:
             },
             workflow_venv=(
                 Path(value) if (value := env.get("WORKFLOW_VENV", "").strip()) else None
+            ),
+            lmcache_venv=(
+                Path(value) if (value := env.get("LMCACHE_VENV", "").strip()) else None
             ),
         )
         return cls(
