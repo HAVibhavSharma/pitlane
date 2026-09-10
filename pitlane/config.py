@@ -62,6 +62,42 @@ class Paths:
     vllm_log_dir: Path
     workflow_repo: Path
     vllm_repos: dict[str, Path]
+    # Each vLLM build is installed into its own virtualenv -- three checkouts
+    # of vllm cannot share one site-packages. Empty means "whatever is on PATH",
+    # which is only safe when a single arm is ever run on this machine; with
+    # more than one it silently serves the same build every time.
+    venvs: dict[str, Path] = field(default_factory=dict)
+    workflow_venv: Path | None = None
+
+
+def venv_bin(venv: Path | None, name: str) -> str:
+    """The path to `name` inside `venv`, or the bare name to resolve on PATH.
+
+    Bare is the fallback, not the intent: a machine hosting more than one arm
+    has one virtualenv per vLLM build, and resolving `vllm` on PATH there serves
+    whichever one the shell happened to activate.
+    """
+    if venv is None:
+        return name
+    return str(Path(venv) / "bin" / name)
+
+
+def venv_env(venv: Path | None, env: dict[str, str] | None = None) -> dict[str, str]:
+    """`VIRTUAL_ENV` and a `PATH` prefix, so child processes stay in the venv.
+
+    The absolute path to the binary is enough to start the right one; this is
+    for everything it spawns afterwards, and for anything that shells out by
+    name.
+    """
+    out = dict(env or {})
+    if venv is None:
+        return out
+    bin_dir = str(Path(venv) / "bin")
+    out["VIRTUAL_ENV"] = str(venv)
+    out["PATH"] = f"{bin_dir}:{out.get('PATH') or os.environ.get('PATH', '')}"
+    # A stale PYTHONHOME points the interpreter at another prefix's stdlib.
+    out.pop("PYTHONHOME", None)
+    return out
 
 
 @dataclass
@@ -110,6 +146,18 @@ class Config:
                 "continuum": Path(need("VLLM_CONTINUUM_REPO")),
                 "ours": Path(need("VLLM_OURS_REPO")),
             },
+            venvs={
+                key: Path(value)
+                for key, name in (
+                    ("baseline", "VLLM_BASELINE_VENV"),
+                    ("continuum", "VLLM_CONTINUUM_VENV"),
+                    ("ours", "VLLM_OURS_VENV"),
+                )
+                if (value := env.get(name, "").strip())
+            },
+            workflow_venv=(
+                Path(value) if (value := env.get("WORKFLOW_VENV", "").strip()) else None
+            ),
         )
         return cls(
             env=env,

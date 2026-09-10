@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pitlane.arms import Arm
+from pitlane import config as config_mod
 from pitlane.config import Config
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def run(
     env = {k: v for k, v in env.items() if v != ""}
 
     command = [
-        "python", arm.workflow_script,
+        config_mod.venv_bin(config.paths.workflow_venv, "python"), arm.workflow_script,
         *adapter.selection_args(count, question_id),
         *arm.workflow_args,
     ]
@@ -120,7 +121,10 @@ def run(
     (cell / "question_started_ts").write_text(f"{started!r}\n")
     with log_path.open("w") as log:
         process = subprocess.run(
-            command, cwd=repo, env={**dict(_os_environ()), **env},
+            command, cwd=repo,
+            env=config_mod.venv_env(
+                config.paths.workflow_venv, {**dict(_os_environ()), **env}
+            ),
             stdout=log, stderr=subprocess.STDOUT,
         )
     finished = time.time()

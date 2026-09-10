@@ -29,6 +29,11 @@ class Arm:
     workflow_env: dict[str, str]
     needs_redis: bool = False
     log_name: str = "server.log"
+    # Key into `Paths.venvs`. Defaults to `repo` in `_build`, since one
+    # virtualenv per vLLM checkout is the normal case; named separately so two
+    # arms can share a build with different flags without sharing a venv entry
+    # by accident.
+    venv: str = ""
 
     def resolved_env(self, which: str, *, repo: Path, cell: Path) -> dict[str, str]:
         source = self.server_env if which == "server" else self.workflow_env
@@ -94,5 +99,6 @@ def load(path: Path = _ARMS_FILE) -> Registry:
             workflow_args=list(body.get("workflow_args", [])),
             workflow_env=dict(body.get("workflow_env", {})),
             needs_redis=bool(body.get("needs_redis", False)),
+            venv=body.get("venv", body["repo"]),
         )
     return Registry(arms)

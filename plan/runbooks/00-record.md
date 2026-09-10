@@ -41,6 +41,7 @@ tmux kill-session -t vllm 2>/dev/null
 tmux new-session -d -s vllm -c "$VLLM_BASELINE_REPO"
 tmux send-keys -t vllm 'LMCACHE_MP_FULL_HIT_ONLY=0 VLLM_USE_DEEP_GEMM=0 \
 VLLM_REQUEST_STATS_DIR=./vllm_request_stats/ \
+. "$VLLM_BASELINE_VENV/bin/activate"
 vllm serve '"$MODEL_NAME"' --port 8000 \
   --enable-auto-tool-choice --tool-call-parser hermes \
   --hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}" \
@@ -63,7 +64,7 @@ export LANGGRAPH_ABLATION_MODE=full
 export ODR_TRACE_MODE=record
 export ODR_TRACE_PATH="$TRACE_DIR/drb_v1_3.jsonl"       # new file; append is refused
 
-python tests/run_evaluate.py \
+"$WORKFLOW_VENV/bin/python" tests/run_evaluate.py \
   --max-queries 10 --completions-per-query 1 \
   --ablation-mode baseline --skip-cold-phase --no-kv-metrics-reset
 ```

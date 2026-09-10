@@ -19,6 +19,7 @@ from pathlib import Path
 
 from pitlane import tmux
 from pitlane.arms import Arm
+from pitlane import config as config_mod
 from pitlane.config import Config
 
 logger = logging.getLogger(__name__)
@@ -82,19 +83,25 @@ def stop_lmcache() -> None:
 def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     """Launch the arm's vLLM and block until it serves /v1/models."""
     repo = config.paths.vllm_repos[arm.repo]
+    venv = config.paths.venvs.get(arm.venv)
     log_path = cell / arm.log_name
     stats_dir = cell / "stats"
     stats_dir.mkdir(parents=True, exist_ok=True)
 
     env = arm.resolved_env("server", repo=repo, cell=cell)
     env["VLLM_REQUEST_STATS_DIR"] = str(stats_dir)
+    # Each build lives in its own virtualenv; `vllm` on PATH is whichever one
+    # the shell activated, which for a multi-arm run is the wrong one twice out
+    # of three times.
+    env = config_mod.venv_env(venv, env)
     env = {k: v for k, v in env.items() if v != ""}
 
     args = " ".join(
         shlex.quote(a) for a in arm.resolved_server_args(repo=repo, cell=cell)
     )
     command = (
-        f"vllm serve {shlex.quote(config.model_name)} --port {config.port} "
+        f"{shlex.quote(config_mod.venv_bin(venv, 'vllm'))} "
+        f"serve {shlex.quote(config.model_name)} --port {config.port} "
         f"{args} > {shlex.quote(str(log_path))} 2>&1"
     )
     tmux.kill(VLLM_SESSION)

@@ -43,6 +43,7 @@ tmux send-keys -t vllm 'export VLLM_NODE_EVICTION_POLICY=1 \
   VLLM_NODE_EVICTION_DECISION_LOG='"$CELL"'/evictions.jsonl \
   VLLM_REQUEST_STATS_DIR='"$CELL"'/stats' Enter
 tmux send-keys -t vllm 'LMCACHE_MP_FULL_HIT_ONLY=0 VLLM_USE_DEEP_GEMM=0 \
+. "$VLLM_OURS_VENV/bin/activate"
 vllm serve '"$MODEL_NAME"' --port 8000 \
   --enable-auto-tool-choice --tool-call-parser hermes \
   --hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}" \
@@ -78,7 +79,7 @@ export ODR_TRACE_ON_MISS=strict
 export ODR_TRACE_REPORT=$CELL/divergence.jsonl
 
 date +%s.%N > "$CELL/question_started_ts"
-python tests/run_evaluate_node_eviction.py \
+"$WORKFLOW_VENV/bin/python" tests/run_evaluate_node_eviction.py \
   --max-queries 1 --completions-per-query 1 \
   2>&1 | tee "$CELL/workflow.log"
 ```

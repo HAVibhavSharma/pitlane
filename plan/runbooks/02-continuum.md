@@ -30,6 +30,7 @@ tmux kill-session -t vllm 2>/dev/null
 tmux new-session -d -s vllm -c "$VLLM_CONTINUUM_REPO"
 tmux send-keys -t vllm 'LMCACHE_CONFIG_FILE=$(pwd)/lmcache-config.yaml \
 VLLM_USE_DEEP_GEMM=0 VLLM_REQUEST_STATS_DIR='"$CELL"'/stats \
+. "$VLLM_CONTINUUM_VENV/bin/activate"
 vllm serve '"$MODEL_NAME"' --port 8000 \
   --enable-auto-tool-choice --tool-call-parser hermes \
   --hf-overrides "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}" \
@@ -55,7 +56,7 @@ export ODR_TRACE_ON_MISS=strict
 export ODR_TRACE_REPORT=$CELL/divergence.jsonl
 
 date +%s.%N > "$CELL/question_started_ts"
-python tests/run_evaluate.py \
+"$WORKFLOW_VENV/bin/python" tests/run_evaluate.py \
   --max-queries 1 --completions-per-query 1 \
   --ablation-mode baseline --no-kv-metrics-reset \
   2>&1 | tee "$CELL/workflow.log"

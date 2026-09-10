@@ -93,6 +93,40 @@ def _paths(config: Config) -> list[Check]:
     return checks
 
 
+def _venvs(config: Config, arm: str | None) -> list[Check]:
+    """Each arm's virtualenv, and the workflow's.
+
+    Not a nicety. Three vLLM checkouts cannot share one site-packages, so an
+    unset venv means `vllm` resolves on PATH and every arm serves whichever
+    build the shell activated -- a run that completes, produces plausible
+    numbers, and compares a stack against itself.
+    """
+    checks: list[Check] = []
+    wanted = [arm] if arm else sorted(config.paths.vllm_repos)
+    for name in wanted:
+        venv = config.paths.venvs.get(name)
+        if venv is None:
+            checks.append(Check(
+                f"venv [{name}]", False,
+                f"unset; `vllm` will resolve on PATH -- set VLLM_{name.upper()}_VENV",
+                fatal=False,
+            ))
+            continue
+        binary = venv / "bin" / "vllm"
+        checks.append(Check(f"venv [{name}]", binary.exists(), str(binary)))
+    venv = config.paths.workflow_venv
+    if venv is None:
+        checks.append(Check(
+            "venv [workflow]", False,
+            "unset; `python` will resolve on PATH -- set WORKFLOW_VENV",
+            fatal=False,
+        ))
+    else:
+        binary = venv / "bin" / "python"
+        checks.append(Check("venv [workflow]", binary.exists(), str(binary)))
+    return checks
+
+
 def run(config: Config, arm: str | None = None) -> list[Check]:
     """All checks for `arm` (or the arm-independent ones when arm is None)."""
     checks: list[Check] = [
@@ -102,6 +136,7 @@ def run(config: Config, arm: str | None = None) -> list[Check]:
         _port_free(config.port),
         _disk_free(config.paths.bench_root),
         *_paths(config),
+        *_venvs(config, arm),
     ]
     if arm == "ours":
         checks.append(_redis(config.redis_url))

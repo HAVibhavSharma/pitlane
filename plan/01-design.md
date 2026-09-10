@@ -73,6 +73,12 @@ BENCH_WORKFLOW_REPO=/home/vibhav/open_deep_research      # workflow under test
 VLLM_BASELINE_REPO=/home/vibhav/Build/vllm-baseline
 VLLM_CONTINUUM_REPO=/home/vibhav/Build/vllm-continuum
 VLLM_OURS_REPO=/home/vibhav/Build/KVCOMM-VLLM/vllm
+
+# one virtualenv per build -- three vllm checkouts cannot share site-packages
+VLLM_BASELINE_VENV=/home/vibhav/venvs/baseline
+VLLM_CONTINUUM_VENV=/home/vibhav/venvs/continuum
+VLLM_OURS_VENV=/home/vibhav/venvs/ours
+WORKFLOW_VENV=/home/vibhav/venvs/odr
 BENCH_ROOT=/disk2/vibhav/bench                          # all run artifacts
 ODR_TRACE_DIR=/disk2/vibhav/traces
 TAVILY_CACHE_DIR=/disk2/vibhav/tavily_cache
@@ -87,6 +93,18 @@ BENCH_MIN_FREE_RAM_GB=260        # l1-size-gb 200 + margin
 BENCH_SERVER_READY_TIMEOUT_S=1800
 BENCH_PREFETCH_LEAD_MIN_S=0.1    # below this lead a phantom counts as late
 ```
+
+Each vLLM build is installed into **its own virtualenv**, and the four `*_VENV`
+keys are how pitlane finds them. This is not a convenience: three checkouts of
+`vllm` cannot share one `site-packages`, so with them unset `vllm serve` resolves
+on `PATH` and every arm boots whichever build the shell happened to activate —
+a run that completes, produces plausible numbers, and compares a stack against
+itself. `stack.start_server` invokes `<venv>/bin/vllm` by absolute path and sets
+`VIRTUAL_ENV` plus a `PATH` prefix for anything it spawns; `workflow.run` does
+the same with `<WORKFLOW_VENV>/bin/python`. An arm may override which entry it
+uses with `venv = "..."` in `arms.toml`, which otherwise defaults to its `repo`
+key. `pitlane preflight` reports each one and warns when it is unset, since
+falling back to `PATH` is a fallback and never the intent.
 
 Everything else from the manual runbook (`MODEL_PROVIDER`, the four
 `*_MODEL_MAX_TOKENS`, `LANGGRAPH_PROMPT_PSEUDO_DYNAMIC`, the
