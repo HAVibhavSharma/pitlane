@@ -74,6 +74,17 @@ class Paths:
     workflow_venv: Path | None = None
 
 
+def _or(env: dict[str, str], key: str, default: str) -> str:
+    """`env[key]` if it has a value, else `default`.
+
+    A blank key is not a value. Shell env files are written by filling in the
+    right-hand side of a template, so a key the operator has not got to yet is
+    present and empty rather than absent -- and `dict.get(key, default)` hands
+    back that empty string, never reaching the default.
+    """
+    return env.get(key, "").strip() or default
+
+
 def venv_bin(venv: Path | None, name: str) -> str:
     """The path to `name` inside `venv`, or the bare name to resolve on PATH.
 
@@ -139,14 +150,18 @@ class Config:
             return value
 
         paths = Paths(
-            bench_root=Path(env.get("BENCH_ROOT", "/disk2/vibhav/bench")),
+            # `.get` with a default does not help a key that is present but
+            # blank: it returns the empty string, and `Path("")` is the current
+            # directory. Every artifact would land wherever the tool was run
+            # from, which looks like it worked. Same for the two below.
+            bench_root=Path(_or(env, "BENCH_ROOT", "/disk2/vibhav/bench")),
             trace_dir=Path(need("TRACE_DIR")),
             lmcache_l2_dir=(
                 Path(value) if (value := env.get("LMCACHE_L2_DIR", "").strip())
                 else None
             ),
-            tavily_cache_dir=Path(env.get("TAVILY_CACHE_DIR", "")),
-            vllm_log_dir=Path(env.get("VLLM_LOG_DIR", "")),
+            tavily_cache_dir=Path(_or(env, "TAVILY_CACHE_DIR", "")),
+            vllm_log_dir=Path(_or(env, "VLLM_LOG_DIR", "")),
             workflow_repo=Path(need("WORKFLOW_REPO")),
             vllm_repos={
                 "baseline": Path(need("VLLM_BASELINE_REPO")),

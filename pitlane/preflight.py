@@ -43,7 +43,19 @@ def _gpu_free(gpu: int) -> Check:
         capture_output=True, text=True,
     ).stdout.strip()
     if procs:
-        return Check("gpu", False, f"GPU busy: {len(procs)} compute process(es); mem {mem} MiB")
+        # A warning, not a blocker. Sharing the card is a legitimate choice --
+        # another job, an idle notebook, a server left up on purpose -- and the
+        # run fails loudly and immediately if the VRAM is not actually there.
+        # Refusing to start is the wrong trade: it stops a run that would have
+        # worked, and it cannot tell a neighbour that matters from one that
+        # does not. What it costs is comparability, since a co-tenant changes
+        # the latencies being measured, which is why it still prints.
+        return Check(
+            "gpu", False,
+            f"GPU busy: {len(procs)} compute process(es); mem {mem} MiB "
+            "-- latencies will not be comparable against an idle-card run",
+            fatal=False,
+        )
     return Check("gpu", True, f"GPU {gpu} idle, mem {mem} MiB")
 
 
