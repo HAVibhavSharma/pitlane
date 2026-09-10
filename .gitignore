@@ -3,5 +3,5 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Box-specific virtualenv paths; see plan/runbooks/venvs.env.example
-plan/runbooks/venvs.env
+# Filled-in copy of example.env
+.env

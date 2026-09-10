@@ -95,9 +95,8 @@ BENCH_PREFETCH_LEAD_MIN_S=0.1    # below this lead a phantom counts as late
 ```
 
 Each vLLM build is installed into **its own virtualenv**, and the four `*_VENV`
-keys are how pitlane finds them — fill them in from
-`plan/runbooks/venvs.env.example`, which also carries the create and verify
-steps. This is not a convenience: three checkouts of
+keys are how pitlane finds them, and like every other key they are filled in
+from `example.env` at the repo root. This is not a convenience: three checkouts of
 `vllm` cannot share one `site-packages`, so with them unset `vllm serve` resolves
 on `PATH` and every arm boots whichever build the shell happened to activate —
 a run that completes, produces plausible numbers, and compares a stack against

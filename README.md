@@ -33,17 +33,23 @@ Optionally `pip install -e .` to get a `pitlane` entry point.
 
 ## Configure
 
-Two files. Secrets in `~/.bench.env`, everything else in
-[`plan/runbooks/common.env`](plan/runbooks/common.env):
+Copy [`example.env`](example.env) to `.env` and fill it in — every key the
+tool reads is listed there, one file, gitignored. Secrets may stay in
+`~/.bench.env` instead if you would rather not keep them alongside the paths.
 
 ```bash
-# ~/.bench.env
-TAVILY_API_KEY=...
-LANGSMITH_API_KEY=...
+cp example.env .env && $EDITOR .env
+pitlane preflight --arm ours     # checks the repos, venvs, GPU, RAM and ports
 ```
 
-Both are plain shell env files, so the same files drive the by-hand
-[runbooks](plan/runbooks/README.md).
+The four `*_VENV` keys are the ones worth getting right: each vLLM build has
+its own virtualenv, and with them unset `vllm serve` resolves on `PATH`, so
+every arm boots whichever build the shell activated — a run that completes and
+compares a stack against itself. `preflight` warns when one is missing.
+
+These are plain shell env files, so the same values drive the by-hand
+[runbooks](plan/runbooks/README.md), whose remaining defaults live in
+[`plan/runbooks/common.env`](plan/runbooks/common.env).
 
 ## Use
 

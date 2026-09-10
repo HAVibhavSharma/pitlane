@@ -12,23 +12,25 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
 
 ## Conventions
 
-- **Secrets** live in `~/.bench.env` (`TAVILY_API_KEY`, `LANGSMITH_API_KEY`);
-  the box-specific virtualenv paths in `venvs.env` (untracked, from
-  [venvs.env.example](venvs.env.example)); everything else in
-  [common.env](common.env). Every runbook starts with:
+- **Every key is in [`example.env`](../../example.env)** at the repo root.
+  Copy it to `.env` (gitignored) and fill it in; that is the one file to edit
+  on a new box. Secrets may stay in `~/.bench.env` instead. Every runbook
+  starts with:
   ```bash
   set -a; . ~/.bench.env
-  [ -f "$(dirname "$0")/venvs.env" ] && . "$(dirname "$0")/venvs.env"
+  [ -f "$(dirname "$0")/../../.env" ] && . "$(dirname "$0")/../../.env"
   . "$(dirname "$0")/common.env"; set +a
   ```
-  `venvs.env` is guarded because it is untracked and may not exist yet; without
-  it `common.env`'s defaults apply. Order matters only in that a real
-  environment variable wins over `common.env`'s default for the same key.
+  `.env` is guarded because it may not exist yet; without it `common.env`'s
+  defaults apply. Order matters only in that a real environment variable wins
+  over `common.env`'s default for the same key.
 - **One virtualenv per build.** Three `vllm` checkouts cannot share a
-  `site-packages`, so each has its own. Fill the four paths in by copying
-  [venvs.env.example](venvs.env.example) to `venvs.env` and sourcing it ahead
-  of `common.env`; that file also carries the create and verify steps. A
-  runbook then activates the right one before `vllm serve`:
+  `site-packages`, so each has its own, and each pairs with a `*_REPO`. Set the
+  four `*_VENV` keys to the venv **roots** -- pitlane appends `bin/vllm` and
+  `bin/python` itself -- and note that `WORKFLOW_VENV` must carry the langgraph
+  fork rather than the released package, since ODR imports
+  `langgraph.pregel._vllm_agent`. `pitlane preflight` reports each one. A
+  runbook activates the right one before `vllm serve`:
   ```bash
   . "$VLLM_OURS_VENV/bin/activate"      # or _BASELINE_ / _CONTINUUM_
   ```
