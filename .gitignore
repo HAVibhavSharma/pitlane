@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 *.egg-info/
+
+# Box-specific virtualenv paths; see plan/runbooks/venvs.env.example
+plan/runbooks/venvs.env

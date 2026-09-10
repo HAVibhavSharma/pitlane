@@ -13,13 +13,22 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
 ## Conventions
 
 - **Secrets** live in `~/.bench.env` (`TAVILY_API_KEY`, `LANGSMITH_API_KEY`);
-  everything else is in [common.env](common.env). Every runbook starts with:
+  the box-specific virtualenv paths in `venvs.env` (untracked, from
+  [venvs.env.example](venvs.env.example)); everything else in
+  [common.env](common.env). Every runbook starts with:
   ```bash
-  set -a; . ~/.bench.env; . "$(dirname "$0")/common.env"; set +a
+  set -a; . ~/.bench.env
+  [ -f "$(dirname "$0")/venvs.env" ] && . "$(dirname "$0")/venvs.env"
+  . "$(dirname "$0")/common.env"; set +a
   ```
+  `venvs.env` is guarded because it is untracked and may not exist yet; without
+  it `common.env`'s defaults apply. Order matters only in that a real
+  environment variable wins over `common.env`'s default for the same key.
 - **One virtualenv per build.** Three `vllm` checkouts cannot share a
-  `site-packages`, so each has its own and a runbook activates it before
-  `vllm serve`:
+  `site-packages`, so each has its own. Fill the four paths in by copying
+  [venvs.env.example](venvs.env.example) to `venvs.env` and sourcing it ahead
+  of `common.env`; that file also carries the create and verify steps. A
+  runbook then activates the right one before `vllm serve`:
   ```bash
   . "$VLLM_OURS_VENV/bin/activate"      # or _BASELINE_ / _CONTINUUM_
   ```
