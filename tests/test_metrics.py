@@ -89,6 +89,19 @@ def check(tmp: Path) -> None:
     assert m.external_token_hits == 1_000
     assert m.workflow_output_tokens == 2_000, m.workflow_output_tokens
 
+    # Per-request phase timings, with the phantom's poisoned fields rejected.
+    per = {e["request_id"]: e for e in m.per_request}
+    assert abs(per["r1"]["queued_s"] - 0.2) < 1e-9
+    assert abs(per["r1"]["prefill_s"] - 0.3) < 1e-9
+    assert abs(per["r1"]["decode_s"] - 7.5) < 1e-9
+    # ttft is queue + prefill by construction, so the three must agree.
+    assert abs(per["r1"]["ttft_s"] - (per["r1"]["queued_s"] + per["r1"]["prefill_s"])) < 1e-9
+    ghost = m.per_prefetch[0]
+    assert ghost["decode_s"] is None, ghost["decode_s"]
+    # 1.5s span minus 0.1s queue: derived, because the engine's own
+    # `prefill_time` on a token-less request is a negative monotonic value.
+    assert abs(ghost["prefill_s"] - 1.4) < 1e-6, ghost["prefill_s"]
+
     assert m.ttft_source_node == "final_report_generation"
     assert abs(m.ttft_s - 33.0) < 1e-6, m.ttft_s
 
@@ -186,6 +199,30 @@ route=replay_prefetch
 event=prefetch_skipped agent_id=seed issuer=langgraph reason=claimed_by_other_caller
 (APIServer pid=429518) INFO 2026-09-09 19:02:03.900 [api_router.py:635] not an echo line
 """
+
+
+def check_poisoned_intervals(tmp: Path) -> None:
+    """A phantom's `prefill_time` is negative in the raw rows; it must not land."""
+    cell = build_useful_cell(tmp / "poison")
+    rows = _read(cell / "stats" / "finished_requests_engine0_x.jsonl")
+    for row in rows:
+        if row["prefetch_only"]:
+            # What vLLM actually writes for a request that produced no token:
+            # first_token_ts (0.0) - scheduled_ts (monotonic).
+            row["prefill_time"] = -35847.219
+            row["decode_time"] = 0.0
+            row["queued_time"] = 0.05
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", rows)
+    m = metrics.collect(cell, arm="ours", question_id="q5", t0=T0, t1=T0 + 100)
+    for ghost in m.per_prefetch:
+        assert ghost["prefill_s"] is not None and ghost["prefill_s"] >= 0.0, ghost
+        assert ghost["decode_s"] is None, ghost
+        assert ghost["queued_s"] == 0.05, ghost
+    # The seed phantom spans 1s and queued 0.05s of it.
+    seed = next(g for g in m.per_prefetch if g["agent_id"] == "seed")
+    assert abs(seed["prefill_s"] - 0.95) < 1e-6, seed["prefill_s"]
+    print("poisoned intervals rejected:", len(m.per_prefetch), "phantoms")
+    print("\nall interval assertions passed")
 
 
 def check_lead_markers(tmp: Path) -> None:
@@ -296,9 +333,91 @@ def check_useful(tmp: Path) -> None:
     print("\nall useful-prefetch assertions passed")
 
 
+def build_timeline_cell(tmp: Path) -> Path:
+    """A warmup phantom, a repeated agent, and three genuinely parallel calls."""
+    cell = tmp / "ours" / "q4" / "rep1"
+    sup = "langgraph:1:research_supervisor:supervisor"
+    tools = "langgraph:1:research_supervisor:supervisor_tools:researcher_tools"
+    rows = [
+        # Population phase: must never reach the timeline.
+        dict(request_id="w1", job_id="j4", agent_id="langgraph:*:**:supervisor",
+             langgraph_node="supervisor", prefetch_only=True,
+             arrival_ts=T0 + 0.1, finish_ts=T0 + 0.2, num_prompt_tokens=100),
+        dict(request_id="p1", job_id="j4", agent_id=sup, langgraph_node="supervisor",
+             prefetch_only=True, arrival_ts=T0 + 1.0, finish_ts=T0 + 1.019,
+             num_prompt_tokens=838, num_local_cached_tokens=0),
+        dict(request_id="s1", job_id="j4", agent_id=sup, langgraph_node="supervisor",
+             prefetch_only=False, arrival_ts=T0 + 1.1, finish_ts=T0 + 5.0,
+             queued_time=0.1, prefill_time=0.2, num_prompt_tokens=911,
+             num_local_cached_tokens=320, num_generation_tokens=100),
+        # Three concurrent tool calls: same agent id, must stay three bars.
+        *[
+            dict(request_id=f"t{i}", job_id="j4", agent_id=tools,
+                 langgraph_node="researcher_tools", prefetch_only=False,
+                 arrival_ts=T0 + 5.1 + i * 0.001, finish_ts=T0 + 30.0 + i * 4,
+                 queued_time=0.1, prefill_time=8.0, num_prompt_tokens=13_000 + i,
+                 num_local_cached_tokens=96, num_generation_tokens=200)
+            for i in range(3)
+        ],
+        # Second turn of the same agent -> Chat #2, not a merge.
+        dict(request_id="s2", job_id="j4", agent_id=sup, langgraph_node="supervisor",
+             prefetch_only=False, arrival_ts=T0 + 45.0, finish_ts=T0 + 60.0,
+             queued_time=0.1, prefill_time=0.4, num_prompt_tokens=2_065,
+             num_local_cached_tokens=1_040, num_generation_tokens=300),
+    ]
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", rows)
+    (cell / "question_started_ts").write_text(f"{T0}\n")
+    return cell
+
+
+def check_timeline(tmp: Path) -> None:
+    from pitlane import timeline
+
+    cell = build_timeline_cell(tmp)
+    m = metrics.collect(cell, arm="ours", question_id="q4", rep=1, t0=T0, t1=T0 + 100)
+    events = timeline.events(m)
+
+    # The population phantom is gone; the concrete one is not.
+    assert all("*" not in e.agent_id for e in events), [e.agent_id for e in events]
+    assert sum(1 for e in events if e.kind == "prefetch") == 1
+    assert sum(1 for e in events if e.kind == "chat") == 5, events
+
+    # Parallel calls stay separate and are numbered, never merged.
+    tools = [e for e in events if e.agent_id.endswith("researcher_tools")]
+    assert [e.index for e in tools] == [1, 2, 3], [e.index for e in tools]
+    assert len({(e.start, e.end) for e in tools}) == 3
+
+    # A repeated agent numbers chronologically.
+    sup = [e for e in events if e.agent_id.endswith(":supervisor") and e.kind == "chat"]
+    assert [e.index for e in sup] == [1, 2]
+
+    # The short prefetch keeps its true length, and says so in its label.
+    warm = next(e for e in events if e.kind == "prefetch")
+    assert abs(warm.duration_s - 0.019) < 1e-6, warm.duration_s
+    assert "19.0 ms" in warm.label, warm.label
+
+    body = timeline.mermaid(m)
+    assert body.count(":crit,") == 1 and body.count(":active,") == 5
+    assert "langgraph:" not in body.split("dateFormat")[1], "prefix not stripped"
+    # Every task id is unique, or Mermaid silently drops the duplicates.
+    ids = [ln.split(",")[1].strip() for ln in body.splitlines() if ":crit," in ln or ":active," in ln]
+    assert len(ids) == len(set(ids)) == 6, ids
+
+    md = timeline.table(m)
+    assert "chat-completion calls: **5**" in md
+    assert "concrete-agent prefetches: **1**" in md
+
+    written = timeline.write(tmp / "timelines", m)
+    print("timeline:", [p.name for p in written],
+          "| chats=5 prefetches=1, 3 parallel tool calls preserved")
+    print("\nall timeline assertions passed")
+
+
 if __name__ == "__main__":
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         check(Path(tmp))
         check_useful(Path(tmp))
+        check_poisoned_intervals(Path(tmp))
         check_lead_markers(Path(tmp))
+        check_timeline(Path(tmp))

@@ -386,6 +386,9 @@ Layout:
 ```
 $BENCH_ROOT/<run_id>/
   state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
+  prefetches.csv                              one row per phantom
+  timelines/<arm>__<question_id>__rep<k>.mmd   Mermaid Gantt of the cell
+  timelines/<arm>__<question_id>__rep<k>.md    per-call table + counts
   <arm>/<question_id>/rep<k>/
       metrics.json  server.log  workflow.log
       stats/finished_requests_engine0_*.jsonl
@@ -393,8 +396,39 @@ $BENCH_ROOT/<run_id>/
       divergence.jsonl  agent_prefetch.jsonl
 ```
 
-`results.csv` is one row per cell and `requests.csv` one row per chat completion
-(with `arm` / `question_id` / `rep` prefixed, so it is groupable on its own);
+`timelines/` is the shape the tables cannot show: one Mermaid Gantt per cell,
+one section per agent id, `:crit` (orange) for a phantom and `:active` (blue)
+for a chat completion. Built from the same request rows as everything else --
+`agent_prefetch_start` / `agent_prefetch_end` take their instants from the
+engine, and the engine already writes them as `arrival_ts` / `finish_ts` on the
+phantom's own row, so reading the log back would be a lossier route to the same
+two numbers. Population phantoms (`langgraph:*:**:...`) never appear: they run
+before `t0` and the agent-id filter drops them regardless. Parallel calls are
+never merged -- each row is its own numbered task, so three concurrent
+`researcher_tools` turns are `Chat #1`, `#2`, `#3`. A 19 ms prefetch inside a
+200 s workflow keeps its true start and end; Mermaid may render it as a sliver
+or not at all, so the duration goes in the task name instead. Stretching the bar
+would make the picture legible and the data wrong. The `.md` beside it carries
+the same events as a table, with the call counts the diagram has to agree with,
+rendered from one `events()` list so the two cannot drift apart.
+
+Both request levels carry their phase split — `queued_s`, `prefill_s`,
+`decode_s` — beside the token counts, so a slower cell can be read as queueing,
+prefill or decode without going back to the raw rows. Two cautions, both handled
+in `metrics._interval`. vLLM computes `prefill_time` as
+`first_token_ts - scheduled_ts` with no guard (`v1/metrics/stats.py:501`), and a
+request that produced no token leaves `first_token_ts` at 0.0 — so the field
+arrives as a large *negative* monotonic value rather than as a missing one, and
+every phantom is in that state by construction. Those values are dropped, and a
+phantom's `prefill_s` is derived from its span instead: it has no decode, so
+everything that is not queue wait is the LMCache load or the prefill
+`prefill_on_miss` let through. Its `decode_s` stays blank, which is the honest
+value — not "zero decode" but "no decode phase", since `max_tokens=1` and the
+prefetch-only finalize path mean no sampling step ever runs.
+
+`results.csv` is one row per cell, `requests.csv` one row per chat completion
+and `prefetches.csv` one row per phantom (all three prefixed with `arm` /
+`question_id` / `rep`, so each is groupable on its own);
 `summary.md` pivots `results.csv` into one table per question, a row per arm,
 with the question's total tokens in the header.
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pitlane import metrics as metrics_mod
-from pitlane import report, stack, workflow
+from pitlane import report, stack, timeline, workflow
 from pitlane.arms import Arm, Registry
 from pitlane.config import Config
 
@@ -81,6 +81,8 @@ def run_cell(
     report.write_metrics(cell, collected)
     report.append_row(config.run_dir / "results.csv", collected)
     report.append_request_rows(config.run_dir / "requests.csv", collected)
+    report.append_prefetch_rows(config.run_dir / "prefetches.csv", collected)
+    timeline.write(config.run_dir / "timelines", collected)
     report.write_summary(config.run_dir)
 
     if not keep_stack and not reuse_stack and not dry_run:

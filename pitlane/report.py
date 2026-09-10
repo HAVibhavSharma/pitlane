@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from typing import Any
 
 from pitlane.metrics import Metrics
 
@@ -108,6 +109,7 @@ def write_summary(run_dir: Path) -> Path:
 _REQUEST_COLUMNS = [
     "arm", "question_id", "rep", "seq", "job_id", "agent_id", "langgraph_node",
     "request_id", "arrival_ts", "finish_ts", "ttft_s", "e2e_s",
+    "queued_s", "prefill_s", "decode_s",
     "query_tokens", "token_hits", "external_token_hits", "kv_hit_rate",
     "output_tokens", "prefetches", "late_prefetches", "useful",
     "credited_tokens", "prefetch_lead_s",
@@ -115,20 +117,44 @@ _REQUEST_COLUMNS = [
 ]
 
 
-def append_request_rows(requests_csv: Path, metrics: Metrics) -> None:
-    """One row per chat completion, appended across every cell of the run."""
-    if not metrics.per_request:
+_PREFETCH_COLUMNS = [
+    "arm", "question_id", "rep", "job_id", "agent_id", "langgraph_node",
+    "request_id", "arrival_ts", "finish_ts", "elapsed_ms",
+    "queued_s", "prefill_s", "decode_s", "prompt_tokens",
+]
+
+
+def _append(path: Path, columns: list[str], scope: dict[str, Any],
+            rows: list[dict[str, Any]]) -> None:
+    if not rows:
         return
-    scope = {"arm": metrics.arm, "question_id": metrics.question_id, "rep": metrics.rep}
-    new = not requests_csv.exists()
-    requests_csv.parent.mkdir(parents=True, exist_ok=True)
-    with requests_csv.open("a", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=_REQUEST_COLUMNS)
+    new = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
         if new:
             writer.writeheader()
-        for entry in metrics.per_request:
+        for entry in rows:
             merged = {**scope, **entry}
-            writer.writerow({key: merged.get(key) for key in _REQUEST_COLUMNS})
+            writer.writerow({key: merged.get(key) for key in columns})
+
+
+def append_request_rows(requests_csv: Path, metrics: Metrics) -> None:
+    """One row per chat completion, appended across every cell of the run."""
+    _append(requests_csv, _REQUEST_COLUMNS, _scope(metrics), metrics.per_request)
+
+
+def append_prefetch_rows(prefetches_csv: Path, metrics: Metrics) -> None:
+    """One row per phantom, the same shape of fact as `requests.csv`.
+
+    `decode_s` is always blank here and that is the honest value: a phantom runs
+    no sampling step, so there is no decode phase to have taken zero seconds.
+    """
+    _append(prefetches_csv, _PREFETCH_COLUMNS, _scope(metrics), metrics.per_prefetch)
+
+
+def _scope(metrics: Metrics) -> dict[str, Any]:
+    return {"arm": metrics.arm, "question_id": metrics.question_id, "rep": metrics.rep}
 
 
 def write_metrics(cell: Path, metrics: Metrics) -> Path:

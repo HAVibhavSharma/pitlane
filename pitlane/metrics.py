@@ -74,6 +74,26 @@ def _read_glob(directory: Path, pattern: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _interval(value: Any) -> float | None:
+    """A duration field from the request row, or None when it is not one.
+
+    vLLM computes `prefill_time` as `first_token_ts - scheduled_ts` with no
+    guard (`v1/metrics/stats.py:501`), and a request that produced no token
+    leaves `first_token_ts` at 0.0 -- so the field comes back as a large
+    negative monotonic value rather than as a missing one. Every phantom is in
+    that state by construction: `_finalize_prefetch_only_request` terminates it
+    with `new_token_ids=[]`. Dropping the impossible values keeps a column that
+    means one thing.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0.0 else None
+
+
 def first_token_ts(row: dict[str, Any]) -> float | None:
     """When this request produced its first token, on the wall clock.
 
@@ -108,6 +128,9 @@ class RequestMetrics:
     finish_ts: float | None = None
     ttft_s: float | None = None
     e2e_s: float | None = None
+    queued_s: float | None = None
+    prefill_s: float | None = None
+    decode_s: float | None = None
 
     query_tokens: int = 0
     token_hits: int = 0
@@ -176,6 +199,10 @@ class Metrics:
 
     requests: int = 0
     per_request: list[dict[str, Any]] = field(default_factory=list)
+    # Phantom spans, for the timeline. Same shape of fact as `per_request`:
+    # engine `arrival_ts` / `finish_ts`, which is where `agent_prefetch_start` /
+    # `agent_prefetch_end` in the server log get their instants from anyway.
+    per_prefetch: list[dict[str, Any]] = field(default_factory=list)
     wall_clock_s: float | None = None
     trace_misses: int = 0
     off_pin_requests: int = 0
@@ -292,6 +319,9 @@ def _requests(metrics: Metrics, real: list[dict[str, Any]]) -> None:
             token_hits=row.get("num_local_cached_tokens") or 0,
             external_token_hits=row.get("num_external_cached_tokens") or 0,
             output_tokens=row.get("num_generation_tokens") or 0,
+            queued_s=_interval(row.get("queued_time")),
+            prefill_s=_interval(row.get("prefill_time")),
+            decode_s=_interval(row.get("decode_time")),
         )
         first = first_token_ts(row)
         if first is not None and entry.arrival_ts is not None:
@@ -340,6 +370,35 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
         modes = {str(r.get("wait")) for r in agent_log if "wait" in r}
         if modes:
             metrics.prefetch_wait_mode = ",".join(sorted(modes))
+    for ghost in sorted(phantom, key=lambda r: r.get("arrival_ts") or 0.0):
+        started = ghost.get("arrival_ts")
+        finished = ghost.get("finish_ts")
+        queued = _interval(ghost.get("queued_time"))
+        metrics.per_prefetch.append({
+            "job_id": ghost.get("job_id"),
+            "agent_id": ghost.get("agent_id"),
+            "langgraph_node": ghost.get("langgraph_node"),
+            "request_id": ghost.get("request_id"),
+            "arrival_ts": started,
+            "finish_ts": finished,
+            "elapsed_ms": (
+                (finished - started) * 1000.0
+                if started is not None and finished is not None else None
+            ),
+            "prompt_tokens": ghost.get("num_prompt_tokens") or 0,
+            "queued_s": queued,
+            # The engine's own `prefill_time` is unusable on a phantom (see
+            # `_interval`), so it is derived from the span instead: a phantom has
+            # no decode, so everything that is not queue wait is the LMCache load
+            # or the prefill `prefill_on_miss` let through.
+            "prefill_s": (
+                max(finished - started - (queued or 0.0), 0.0)
+                if started is not None and finished is not None else None
+            ),
+            # Not "zero decode" but "no decode phase": `max_tokens=1` and the
+            # prefetch-only finalize path means no sampling step ever runs.
+            "decode_s": None,
+        })
     if not phantom:
         return
 
