@@ -61,6 +61,8 @@ _ECHO_LINE = re.compile(
     r".*?echo: (?P<body>.*)$"
 )
 _ECHO_FIELD = re.compile(r"(\w+)=(\S+)")
+# The stamp alone, for lines that are not markers -- uvicorn's access log.
+_ECHO_LINE_TS = re.compile(r"(?P<ts>(?:\d{4}-)?\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)")
 # Any full-date stamp in the same file, which is where a yearless line borrows
 # its year. vLLM's own logger and uvicorn's access lines are formatted
 # separately, so a build that is stock in one is usually wide in the other.
@@ -91,6 +93,39 @@ def _read_glob(directory: Path, pattern: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _served_chats(cell: Path, t0: float | None, t1: float | None) -> int | None:
+    """Chat completions the server's own access log says it answered.
+
+    An independent count of the thing `requests` counts, and the only one that
+    survives a stats file being read early: the access line is written by
+    uvicorn as the response starts, the stats row by a separately buffered
+    writer at some later point. When the two disagree the rows are missing, and
+    a run that quietly reports fewer requests than it served looks like a
+    shorter workload rather than a truncated file.
+
+    Counted inside the cell's own window so a reused server, whose log spans
+    several cells, is not read as a surplus.
+    """
+    log = cell / "server.log"
+    if not log.exists():
+        return None
+    text = log.read_text(errors="replace")
+    year = _log_year(text, log)
+    served = 0
+    for line in text.splitlines():
+        if "/v1/chat/completions" not in line or "POST" not in line:
+            continue
+        parsed = _echo_stamp(line, year)
+        if parsed is None:
+            continue
+        if t0 is not None and parsed < t0:
+            continue
+        if t1 is not None and parsed > t1:
+            continue
+        served += 1
+    return served
+
+
 def _log_year(text: str, path: Path) -> int:
     """The year a yearless line in this log belongs to.
 
@@ -106,6 +141,22 @@ def _log_year(text: str, path: Path) -> int:
         return datetime.fromtimestamp(path.stat().st_mtime).year
     except OSError:
         return datetime.now().year
+
+
+def _echo_stamp(line: str, year: int) -> float | None:
+    """The leading server timestamp of any log line, echo or not."""
+    match = _ECHO_LINE_TS.search(line)
+    if not match:
+        return None
+    stamp_text = match["ts"]
+    if stamp_text[4:5] != "-":
+        stamp_text = f"{year}-{stamp_text}"
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(stamp_text, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 def _echo_fields(
@@ -340,6 +391,18 @@ def collect(
 
     if not rows:
         metrics.warnings.append("no request stats in window; check VLLM_REQUEST_STATS_DIR")
+
+    # The server's own account of the same work. `FileStatLogger` writes with
+    # normal buffering, and the collector runs before the server exits, so a
+    # short stats file is the expected failure -- and it is silent, arriving as
+    # a smaller `requests` rather than as an error.
+    served = _served_chats(cell, t0, t1)
+    if served is not None and served > metrics.requests:
+        metrics.warnings.append(
+            f"server answered {served} chat completions but only "
+            f"{metrics.requests} request row(s) were collected: stats file "
+            f"truncated (unflushed writer) or rows outside the window"
+        )
 
     _token_metrics(metrics, real)
     _ttft(metrics, real, t0)

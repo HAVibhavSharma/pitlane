@@ -516,6 +516,50 @@ def check_unsplit_cached_tokens(tmp: Path) -> None:
     print("\nall cached-token assertions passed")
 
 
+def check_truncated_stats(tmp: Path) -> None:
+    """The access log answers more chats than the stats file has rows.
+
+    `FileStatLogger` writes buffered and the collector runs before the server
+    exits, so the tail of a run can simply be absent. It arrives as a smaller
+    `requests` -- a shorter workload, not an error -- which is how a 43-request
+    run came to be reported and compared as a 34-request one.
+    """
+    import datetime as _dt
+
+    cell = tmp / "continuum" / "q8" / "rep1"
+    stamps = [
+        _dt.datetime.strptime(f"2026-09-12 03:{15 + i}:57.336",
+                              "%Y-%m-%d %H:%M:%S.%f").timestamp()
+        for i in range(5)
+    ]
+    # Five answered, but only the first three rows reached the file.
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", [
+        dict(request_id=f"r{i}", job_id="j1", arrival_ts=stamps[i],
+             finish_ts=stamps[i] + 1, num_prompt_tokens=1_000,
+             num_cached_tokens=100, num_generation_tokens=10)
+        for i in range(3)
+    ])
+    access = "\n".join(
+        f'(APIServer pid=1) INFO:     2026-09-12 03:{15 + i}:57.336 127.0.0.1:5 - '
+        f'"POST /v1/chat/completions HTTP/1.1" 200 OK'
+        for i in range(5)
+    )
+    (cell / "server.log").write_text(access + "\n")
+    m = metrics.collect(cell, arm="continuum", question_id="q8",
+                        t0=stamps[0] - 1, t1=stamps[-1] + 1)
+    assert m.requests == 3, m.requests
+    assert any("5 chat completions but only 3" in w for w in m.warnings), m.warnings
+
+    # A reused server's log spans other cells, and lines outside this cell's
+    # window are another cell's work, not this one's missing rows.
+    narrow = metrics.collect(cell, arm="continuum", question_id="q8",
+                             t0=stamps[0] - 1, t1=stamps[2] + 0.5)
+    assert not any("chat completions but only" in w for w in narrow.warnings), narrow.warnings
+    print("truncated stats: warned on 5 served vs 3 collected; "
+          "windowed count stays quiet")
+    print("\nall truncation assertions passed")
+
+
 def check_run_timeline(tmp: Path) -> None:
     """Combined charts: every arm, split per question, each arm rebased.
 
@@ -664,4 +708,5 @@ if __name__ == "__main__":
         check_timeline(Path(tmp))
         check_tool_spans(Path(tmp))
         check_unsplit_cached_tokens(Path(tmp))
+        check_truncated_stats(Path(tmp))
         check_run_timeline(Path(tmp))
