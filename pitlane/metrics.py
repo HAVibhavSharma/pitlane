@@ -108,13 +108,16 @@ def _log_year(text: str, path: Path) -> int:
         return datetime.now().year
 
 
-def _echo_fields(line: str, year: int) -> tuple[float, dict[str, str]] | None:
-    """One echo line as `(server timestamp, fields)`, or None if it is not one.
+def _echo_fields(
+    line: str, year: int,
+) -> tuple[float, dict[str, str], bool] | None:
+    """One echo line as `(server timestamp, fields, sub-second)`, or None.
 
-    `year` fills in for a stock build's yearless stamp. Such a build also logs
-    whole seconds, so its spans are quantised to 1s -- fine for a tool call
-    measured in tens of seconds, and the reason the lead markers, which are
-    measured in milliseconds, are only trusted from a wide-format build.
+    `year` fills in for a stock build's yearless stamp. The third element says
+    whether the stamp carried a sub-second part, because a build that logs
+    whole seconds quantises every span to 1s -- which renders a millisecond
+    tool call as `0.0 ms` with equal ends. The caller uses it to decide whether
+    the server stamps are precise enough to subtract.
     """
     match = _ECHO_LINE.search(line)
     if not match:
@@ -122,13 +125,22 @@ def _echo_fields(line: str, year: int) -> tuple[float, dict[str, str]] | None:
     stamp_text = match["ts"]
     if stamp_text[4:5] != "-":  # no year: `09-11 20:11:49`
         stamp_text = f"{year}-{stamp_text}"
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+    for fmt, exact in (("%Y-%m-%d %H:%M:%S.%f", True), ("%Y-%m-%d %H:%M:%S", False)):
         try:
             stamp = datetime.strptime(stamp_text, fmt).timestamp()
         except ValueError:
             continue
-        return stamp, dict(_ECHO_FIELD.findall(match["body"]))
+        return stamp, dict(_ECHO_FIELD.findall(match["body"])), exact
     return None
+
+
+def _seconds(millis: Any) -> float | None:
+    """A marker's `elapsed_ms` field in seconds, or None if it is not a number."""
+    try:
+        value = float(millis)
+    except (TypeError, ValueError):
+        return None
+    return value / 1000.0 if value >= 0.0 else None
 
 
 def _interval(value: Any) -> float | None:
@@ -586,7 +598,7 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
         parsed = _echo_fields(line, year)
         if parsed is None:
             continue
-        stamp, fields = parsed
+        stamp, fields, _exact = parsed
         if fields.get("event") not in _LEAD_EVENTS:
             continue
         metrics.lead_markers += 1
@@ -662,7 +674,7 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
         parsed = _echo_fields(line, year)
         if parsed is None:
             continue
-        stamp, fields = parsed
+        stamp, fields, exact = parsed
         event = fields.get("event")
         if event not in _TOOL_EVENTS:
             continue
@@ -671,7 +683,7 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
             metrics.unmatched_tool_markers += 1
             continue
         if event == "tool_start":
-            open_spans[call_id] = (stamp, fields)
+            open_spans[call_id] = (stamp, fields, exact)
             continue
         started = open_spans.pop(call_id, None)
         if started is None:
@@ -679,8 +691,25 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
             # mid-tool. Counted rather than dropped silently.
             metrics.unmatched_tool_markers += 1
             continue
-        begin, opening = started
+        begin, opening, begin_exact = started
         agent_id = opening.get("agent_id") or fields.get("agent_id")
+        # From the two server stamps by preference: one clock for every span on
+        # the timeline, and the client's own figure would be the only number
+        # here measured somewhere else.
+        #
+        # Except when the stamps cannot answer. A build logging whole seconds
+        # renders a cached `tavily_search.query` -- a few milliseconds -- as
+        # `0.0 ms` with equal ends, which reads as a call that did not happen
+        # rather than as one too fast for the clock. The marker already carries
+        # the duration the client measured, so the span keeps its server-clock
+        # start and takes its length from `elapsed_ms`.
+        elapsed_s = max(stamp - begin, 0.0)
+        end_ts = stamp
+        if not (exact and begin_exact):
+            reported = _seconds(fields.get("elapsed_ms"))
+            if reported is not None:
+                elapsed_s = reported
+                end_ts = begin + reported
         metrics.per_tool.append({
             # `langgraph:<job>:<path>` -- the marker does not carry `job_id`
             # separately, and the timeline has to group by question.
@@ -689,10 +718,8 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
             "tool": opening.get("tool") or fields.get("tool"),
             "call_id": call_id,
             "start_ts": begin,
-            "end_ts": stamp,
-            # From the two server stamps, not from the client's own
-            # `elapsed_ms`: one clock for every span on the timeline.
-            "elapsed_s": max(stamp - begin, 0.0),
+            "end_ts": end_ts,
+            "elapsed_s": elapsed_s,
         })
 
     # A start with no end is a tool that never returned -- or, far more often, a

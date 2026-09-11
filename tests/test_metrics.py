@@ -462,12 +462,18 @@ def check_tool_spans(tmp: Path) -> None:
     m2 = metrics.collect(cell, arm="baseline", question_id="q6", t0=T0, t1=T0 + 100)
     stock_calls = {row["call_id"]: row for row in m2.per_tool}
     assert set(stock_calls) == {"call_a", "call_b"}, sorted(stock_calls)
-    # Quantised to the second by the format, not mis-paired by it.
-    assert abs(stock_calls["call_a"]["elapsed_s"] - 2.0) < 1e-6, stock_calls
-    assert abs(stock_calls["call_b"]["elapsed_s"] - 1.0) < 1e-6, stock_calls
+    # Subtracting the stamps would give 2.0 and 1.0 -- the quantisation, not
+    # the call. The marker's own `elapsed_ms` is what the client measured, and
+    # it is what a span keeps when the stamps are too coarse to subtract.
+    assert abs(stock_calls["call_a"]["elapsed_s"] - 0.980) < 1e-6, stock_calls
+    assert abs(stock_calls["call_b"]["elapsed_s"] - 0.412) < 1e-6, stock_calls
+    # The start stays on the server clock; only the length comes from the client.
+    assert stock_calls["call_a"]["start_ts"] == stock_calls["call_b"]["start_ts"]
+    assert abs((stock_calls["call_a"]["end_ts"] - stock_calls["call_a"]["start_ts"])
+               - stock_calls["call_a"]["elapsed_s"]) < 1e-6
     assert stock_calls["call_a"]["tool"] == "tavily_search"
     print("stock-format log:", len(m2.per_tool), "paired from yearless "
-          "whole-second stamps")
+          "whole-second stamps, durations from elapsed_ms")
     print("\nall tool-span assertions passed")
 
 
