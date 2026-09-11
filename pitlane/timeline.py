@@ -68,7 +68,7 @@ _WARMUP_MARK = "*"
 class Event:
     """One bar. `kind` is "prefetch", "chat" or "tool"."""
 
-    agent_id: str
+    agent_id: str      # the lane: the graph node, shared by both arms
     kind: str
     index: int          # 1-based, chronological within (arm, agent_id, kind)
     start: float
@@ -117,8 +117,34 @@ class Event:
         return " (" + " · ".join(f"{k} {v:.2f}s" for k, v in parts) + ")"
 
 
-def _concrete(agent_id: str | None) -> bool:
-    return bool(agent_id) and _WARMUP_MARK not in agent_id
+def _concrete(agent_id: str | None, node: str | None = None) -> bool:
+    """Whether this span belongs on a question's chart.
+
+    Not "has an agent id". Only `/v1/agents/*` stamps one, so every `baseline`
+    row has an empty one -- and a filter that required it dropped the entire
+    arm the chart exists to compare against, leaving a comparison with one side
+    in it and nothing to say so. A row with a node name is a real call whatever
+    endpoint served it; what is excluded is the population phase, whose agent
+    ids carry a `*`.
+    """
+    if agent_id and _WARMUP_MARK in agent_id:
+        return False
+    return bool(agent_id or node)
+
+
+def _lane(agent_id: str | None, node: str | None) -> str:
+    """The row a span is drawn on: the graph node, for both arms alike.
+
+    `langgraph_node` rather than `agent_id`, and not only because baseline has
+    no agent id. Within one question's chart the id's `langgraph:<job>:` prefix
+    is redundant -- the file is that job -- and using the node name puts the two
+    arms on identically named lanes, which is what makes a section-by-section
+    read possible at all. Parallel calls on one node stay distinct as numbered
+    tasks, exactly as three concurrent `researcher_tools` turns already did.
+    """
+    if node:
+        return node
+    return (agent_id or "").split(":")[-1] or "(unknown)"
 
 
 def _short(agent_id: str) -> str:
@@ -156,25 +182,31 @@ def events(metrics: Metrics) -> list[Event]:
     """Every concrete-agent bar for one cell, in time order."""
     raw: list[Event] = []
     for entry in metrics.per_prefetch:
-        if _concrete(entry.get("agent_id")) and entry.get("arrival_ts") is not None:
+        if (_concrete(entry.get("agent_id"), entry.get("langgraph_node"))
+                and entry.get("arrival_ts") is not None):
             raw.append(Event(
-                entry["agent_id"], "prefetch", 0, entry["arrival_ts"],
+                _lane(entry.get("agent_id"), entry.get("langgraph_node")),
+                "prefetch", 0, entry["arrival_ts"],
                 entry.get("finish_ts") or entry["arrival_ts"], "",
                 metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
                 entry.get("queued_s"), entry.get("prefill_s"), entry.get("decode_s"),
             ))
     for entry in metrics.per_request:
-        if _concrete(entry.get("agent_id")) and entry.get("arrival_ts") is not None:
+        if (_concrete(entry.get("agent_id"), entry.get("langgraph_node"))
+                and entry.get("arrival_ts") is not None):
             raw.append(Event(
-                entry["agent_id"], "chat", 0, entry["arrival_ts"],
+                _lane(entry.get("agent_id"), entry.get("langgraph_node")),
+                "chat", 0, entry["arrival_ts"],
                 entry.get("finish_ts") or entry["arrival_ts"], "",
                 metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
                 entry.get("queued_s"), entry.get("prefill_s"), entry.get("decode_s"),
             ))
     for entry in metrics.per_tool:
-        if _concrete(entry.get("agent_id")) and entry.get("start_ts") is not None:
+        if (_concrete(entry.get("agent_id"), entry.get("langgraph_node"))
+                and entry.get("start_ts") is not None):
             raw.append(Event(
-                entry["agent_id"], "tool", 0, entry["start_ts"],
+                _lane(entry.get("agent_id"), entry.get("langgraph_node")),
+                "tool", 0, entry["start_ts"],
                 entry.get("end_ts") or entry["start_ts"], entry.get("tool") or "tool",
                 metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
             ))
@@ -315,11 +347,13 @@ def run_events(run_dir: Path) -> list[Event]:
     for name, kind, start_key, end_key, name_key in _CSV_KINDS:
         for row in _rows(run_dir / name):
             agent_id = row.get("agent_id") or ""
+            node = row.get("langgraph_node") or ""
             start = _float(row.get(start_key))
-            if not _concrete(agent_id) or start is None:
+            if not _concrete(agent_id, node) or start is None:
                 continue
             raw.append(Event(
-                agent_id, kind, 0, start, _float(row.get(end_key)) or start,
+                _lane(agent_id, node), kind, 0, start,
+                _float(row.get(end_key)) or start,
                 (row.get(name_key) or "tool") if name_key else "",
                 row.get("arm") or "", str(row.get("job_id") or ""),
                 row.get("question_id") or "",

@@ -434,7 +434,12 @@ def check_tool_spans(tmp: Path) -> None:
 
 
 def check_run_timeline(tmp: Path) -> None:
-    """Combined charts: every arm, split per question, each arm rebased."""
+    """Combined charts: every arm, split per question, each arm rebased.
+
+    `baseline` rows carry no `agent_id` -- only `/v1/agents/*` stamps one -- so
+    the fixture leaves it empty for that arm, which is the shape that used to
+    drop the whole arm off the chart.
+    """
     import csv as _csv
     from pitlane import timeline
 
@@ -448,15 +453,19 @@ def check_run_timeline(tmp: Path) -> None:
     for arm, offset in (("baseline", 0.0), ("ours", 9000.0)):
         for job in (1, 2):
             t = base + offset + (job - 1) * 100
-            reqs.append(dict(arm=arm, question_id="batch2", rep=1, job_id=job,
-                             agent_id=sup.format(j=job), arrival_ts=t, finish_ts=t + 4))
+            reqs.append(dict(
+                arm=arm, question_id="batch2", rep=1, job_id=job,
+                # Baseline goes through plain /v1/chat/completions: no agent id.
+                agent_id="" if arm == "baseline" else sup.format(j=job),
+                langgraph_node="supervisor", arrival_ts=t, finish_ts=t + 4))
             if arm == "ours":
                 pfs.append(dict(arm=arm, question_id="batch2", rep=1, job_id=job,
                                 agent_id=sup.format(j=job),
+                                langgraph_node="supervisor",
                                 arrival_ts=t - 0.088, finish_ts=t - 0.069))
     for name, rows in (("requests.csv", reqs), ("prefetches.csv", pfs)):
         cols = ["arm", "question_id", "rep", "job_id", "agent_id",
-                "arrival_ts", "finish_ts"]
+                "langgraph_node", "arrival_ts", "finish_ts"]
         with (run / name).open("w", newline="") as handle:
             writer = _csv.DictWriter(handle, fieldnames=cols)
             writer.writeheader()
@@ -469,7 +478,9 @@ def check_run_timeline(tmp: Path) -> None:
                      "batch2__job2.md", "batch2__job2.mmd"], names
 
     body = (run / "timelines" / "batch2__job1.mmd").read_text()
-    assert "section baseline · " in body and "section ours · " in body, body
+    # The arm with no agent id must still be drawn, on the same lane name.
+    assert "section baseline · supervisor" in body, body
+    assert "section ours · supervisor" in body, body
     # job 2 must not leak into job 1's chart
     assert ":2:" not in body.split("gantt")[1], body
     # Rebasing: each arm's first event lands on the same stamp, though the two
@@ -518,9 +529,10 @@ def check_timeline(tmp: Path) -> None:
     assert [e.index for e in tools] == [1, 2, 3], [e.index for e in tools]
     assert len({(e.start, e.end) for e in tools}) == 3
 
-    # A repeated agent numbers chronologically.
-    sup = [e for e in events if e.agent_id.endswith(":supervisor") and e.kind == "chat"]
-    assert [e.index for e in sup] == [1, 2]
+    # A repeated agent numbers chronologically. Lanes are graph nodes now, so
+    # both arms land on the same row name and `supervisor` is exact.
+    sup = [e for e in events if e.agent_id == "supervisor" and e.kind == "chat"]
+    assert [e.index for e in sup] == [1, 2], [e.agent_id for e in events]
 
     # The short prefetch keeps its true length, and says so in its label.
     warm = next(e for e in events if e.kind == "prefetch")

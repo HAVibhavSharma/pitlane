@@ -473,8 +473,13 @@ point rather than a bar. Built from the same request rows as everything else --
 `agent_prefetch_start` / `agent_prefetch_end` take their instants from the
 engine, and the engine already writes them as `arrival_ts` / `finish_ts` on the
 phantom's own row, so reading the log back would be a lossier route to the same
-two numbers. Population phantoms (`langgraph:*:**:...`) never appear: they run
-before `t0` and the agent-id filter drops them regardless. Parallel calls are
+two numbers. Lanes are graph nodes, not agent ids, for two reasons: only `/v1/agents/*`
+stamps an `agent_id`, so every `baseline` row has an empty one and a filter
+requiring it drops the whole arm the chart exists to compare against; and within
+one question's file the id's `langgraph:<job>:` prefix is redundant, so the node
+name puts both arms on identically named lanes. Population phantoms
+(`langgraph:*:**:...`) still never appear — they run before `t0`, and the `*` in
+their ids excludes them regardless. Parallel calls are
 never merged -- each row is its own numbered task, so three concurrent
 `researcher_tools` turns are `Chat #1`, `#2`, `#3`. A 19 ms prefetch inside a
 200 s workflow keeps its true start and end; Mermaid may render it as a sliver
