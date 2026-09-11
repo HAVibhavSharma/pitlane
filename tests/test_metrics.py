@@ -440,6 +440,34 @@ def check_tool_spans(tmp: Path) -> None:
     assert "leaf tool calls: **2**" in timeline.table(m)
     print("tool spans:", len(m.per_tool), "paired,",
           m.unmatched_tool_markers, "unpaired, %.3fs total" % m.tool_seconds)
+
+    # A stock build logs `09-11 20:11:49`: no year, whole seconds. Requiring
+    # the wide format silently dropped every one of its markers, which renders
+    # as an arm that called no tools. The year comes from another line in the
+    # same file -- here the access line the fixture prepends.
+    stock = "\n".join(
+        line.replace(stamp(0.1), "09-11 20:11:49")
+            .replace(stamp(0.2), "09-11 20:11:49")
+            .replace(stamp(0.612), "09-11 20:11:50")
+            .replace(stamp(1.08), "09-11 20:11:51")
+        for line in TOOL_LOG_TEMPLATE.format(
+            agent=tools_agent, t0=stamp(0.1), t1=stamp(0.2),
+            t2=stamp(0.612), t3=stamp(1.08)).splitlines()
+    )
+    year = _dt.datetime.fromtimestamp(base).year
+    (cell / "server.log").write_text(
+        f'(APIServer pid=1) INFO:     {year}-09-11 20:11:48.001 127.0.0.1:1 - '
+        f'"POST /v1/echo HTTP/1.1" 200 OK\n{stock}\n'
+    )
+    m2 = metrics.collect(cell, arm="baseline", question_id="q6", t0=T0, t1=T0 + 100)
+    stock_calls = {row["call_id"]: row for row in m2.per_tool}
+    assert set(stock_calls) == {"call_a", "call_b"}, sorted(stock_calls)
+    # Quantised to the second by the format, not mis-paired by it.
+    assert abs(stock_calls["call_a"]["elapsed_s"] - 2.0) < 1e-6, stock_calls
+    assert abs(stock_calls["call_b"]["elapsed_s"] - 1.0) < 1e-6, stock_calls
+    assert stock_calls["call_a"]["tool"] == "tavily_search"
+    print("stock-format log:", len(m2.per_tool), "paired from yearless "
+          "whole-second stamps")
     print("\nall tool-span assertions passed")
 
 

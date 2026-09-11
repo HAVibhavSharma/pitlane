@@ -50,10 +50,21 @@ LEAD_MIN_S = 0.1
 # because the markers carry different fields per event -- `call_id` and `tool`
 # on a tool span, `route` on a warm -- and a regex per shape would need editing
 # every time a call site adds one.
+#
+# The year and the sub-second part are optional because they are not the same
+# across the fleet: only builds carrying the widened `_DATE_FORMAT` log
+# `2026-09-11 20:11:49.137`, and a stock one logs `09-11 20:11:49`. Requiring
+# the wide form drops every marker from the stock builds -- which reads as an
+# arm that called no tools, the one thing it cannot mean.
 _ECHO_LINE = re.compile(
-    r"(?P<ts>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*?echo: (?P<body>.*)$"
+    r"(?P<ts>(?:\d{4}-)?\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)"
+    r".*?echo: (?P<body>.*)$"
 )
 _ECHO_FIELD = re.compile(r"(\w+)=(\S+)")
+# Any full-date stamp in the same file, which is where a yearless line borrows
+# its year. vLLM's own logger and uvicorn's access lines are formatted
+# separately, so a build that is stock in one is usually wide in the other.
+_DATED_LINE = re.compile(r"\b(\d{4})-\d\d-\d\d \d\d:\d\d:\d\d")
 _LEAD_EVENTS = ("min_lead", "max_lead")
 _TOOL_EVENTS = ("tool_start", "tool_end")
 
@@ -80,16 +91,44 @@ def _read_glob(directory: Path, pattern: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _echo_fields(line: str) -> tuple[float, dict[str, str]] | None:
-    """One echo line as `(server timestamp, fields)`, or None if it is not one."""
+def _log_year(text: str, path: Path) -> int:
+    """The year a yearless line in this log belongs to.
+
+    Taken from the file's own first full-date stamp, and only from the file's
+    mtime when it has none. A run that spans New Year would mis-date the lines
+    before midnight by a year; nothing else here is affected, and the
+    alternative is dropping the markers entirely.
+    """
+    match = _DATED_LINE.search(text)
+    if match:
+        return int(match[1])
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).year
+    except OSError:
+        return datetime.now().year
+
+
+def _echo_fields(line: str, year: int) -> tuple[float, dict[str, str]] | None:
+    """One echo line as `(server timestamp, fields)`, or None if it is not one.
+
+    `year` fills in for a stock build's yearless stamp. Such a build also logs
+    whole seconds, so its spans are quantised to 1s -- fine for a tool call
+    measured in tens of seconds, and the reason the lead markers, which are
+    measured in milliseconds, are only trusted from a wide-format build.
+    """
     match = _ECHO_LINE.search(line)
     if not match:
         return None
-    try:
-        stamp = datetime.strptime(match["ts"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
-    except ValueError:
-        return None
-    return stamp, dict(_ECHO_FIELD.findall(match["body"]))
+    stamp_text = match["ts"]
+    if stamp_text[4:5] != "-":  # no year: `09-11 20:11:49`
+        stamp_text = f"{year}-{stamp_text}"
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            stamp = datetime.strptime(stamp_text, fmt).timestamp()
+        except ValueError:
+            continue
+        return stamp, dict(_ECHO_FIELD.findall(match["body"]))
+    return None
 
 
 def _interval(value: Any) -> float | None:
@@ -541,8 +580,10 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
     for row in ordered:
         by_agent.setdefault(row.get("agent_id"), []).append(row)
 
-    for line in log.read_text(errors="replace").splitlines():
-        parsed = _echo_fields(line)
+    text = log.read_text(errors="replace")
+    year = _log_year(text, log)
+    for line in text.splitlines():
+        parsed = _echo_fields(line, year)
         if parsed is None:
             continue
         stamp, fields = parsed
@@ -615,8 +656,10 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
         return
 
     open_spans: dict[str, tuple[float, dict[str, str]]] = {}
-    for line in log.read_text(errors="replace").splitlines():
-        parsed = _echo_fields(line)
+    text = log.read_text(errors="replace")
+    year = _log_year(text, log)
+    for line in text.splitlines():
+        parsed = _echo_fields(line, year)
         if parsed is None:
             continue
         stamp, fields = parsed
