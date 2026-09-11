@@ -320,6 +320,10 @@ def write(timelines_dir: Path, metrics: Metrics) -> list[Path]:
 # second bookkeeping path. Regenerated after every cell, so a matrix that is
 # still running, or one that failed partway, still has whatever it produced.
 
+# The lane a chat gets when its build reports no node for it. Named so the
+# chart says which it is: the calls are real, the labelling is what is absent.
+_UNLABELLED = "chat (node not reported)"
+
 _CSV_KINDS = (
     ("prefetches.csv", "prefetch", "arrival_ts", "finish_ts", None),
     ("requests.csv", "chat", "arrival_ts", "finish_ts", None),
@@ -341,16 +345,43 @@ def _float(value: str | None) -> float | None:
         return None
 
 
+def _labelling_arms(run_dir: Path) -> set[str]:
+    """Arms whose request rows say which node issued them.
+
+    An older build records neither `agent_id` nor `langgraph_node`, so every
+    one of its chat rows looks exactly like a row the strict filter exists to
+    drop. Told apart per arm rather than per row: an arm that labels some of
+    its rows keeps the strict filter -- an unlabelled row there really is the
+    population phase -- and an arm that labels none of them is a build that
+    cannot label, not a run of warmup traffic.
+    """
+    arms: set[str] = set()
+    for row in _rows(run_dir / "requests.csv"):
+        if row.get("agent_id") or row.get("langgraph_node"):
+            arms.add(row.get("arm") or "")
+    return arms
+
+
 def run_events(run_dir: Path) -> list[Event]:
     """Every span the run has produced so far, across arms, from the CSVs."""
     raw: list[Event] = []
+    labelling = _labelling_arms(run_dir)
     for name, kind, start_key, end_key, name_key in _CSV_KINDS:
         for row in _rows(run_dir / name):
             agent_id = row.get("agent_id") or ""
             node = row.get("langgraph_node") or ""
             start = _float(row.get(start_key))
-            if not _concrete(agent_id, node) or start is None:
+            if start is None:
                 continue
+            if not _concrete(agent_id, node):
+                # Drawn on one unnamed lane rather than dropped. An arm whose
+                # build reports no node otherwise renders as an empty chart
+                # next to arms full of bars, which reads as an arm that did no
+                # work -- it served the same 43 calls, and their timing and
+                # order are still worth seeing.
+                if kind != "chat" or (row.get("arm") or "") in labelling:
+                    continue
+                node = _UNLABELLED
             raw.append(Event(
                 _lane(agent_id, node), kind, 0, start,
                 _float(row.get(end_key)) or start,
