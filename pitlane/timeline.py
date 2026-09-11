@@ -391,12 +391,19 @@ def _rebased(events_: list[Event]) -> tuple[list[Event], dict[str, float]]:
 
 
 def combined_mermaid(events_: list[Event], *, title: str) -> str:
-    """One Gantt for several arms, sectioned `<arm> · <agent>`."""
-    shifted, _ = _rebased(events_)
+    """One Gantt, sectioned `<arm> · <node>`.
+
+    Used for both the per-question chart and the per-arm one. Rebasing is a
+    no-op on a single arm -- its origin is the base -- so a per-arm file keeps
+    true wall-clock times without needing a second code path, and the title only
+    claims a rebase when there was one to do.
+    """
+    shifted, origins = _rebased(events_)
+    note = " (each arm rebased to its own start)" if len(origins) > 1 else ""
     lines = [
         _INIT,
         "gantt",
-        f"    title {title} (each arm rebased to its own start)",
+        f"    title {title}{note}",
         "    dateFormat YYYY-MM-DD HH:mm:ss.SSS",
         "    axisFormat %H:%M:%S",
         "    todayMarker off",
@@ -480,11 +487,25 @@ def write_run(run_dir: Path) -> list[Path]:
     for (question, job), group in sorted(groups.items()):
         stem = f"{question}__job{job}" if job else str(question)
         title = f"{question} / job {job}" if job else str(question)
-        for suffix, body in (
-            (".mmd", combined_mermaid(group, title=title)),
-            (".md", combined_table(group, title=title)),
-        ):
-            path = out / f"{stem}{suffix}"
-            path.write_text(body)
-            written.append(path)
+
+        # The comparison chart, and then one per arm. Two questions, two
+        # answers: "what differs" needs the arms on one axis, "what did this
+        # arm do" needs the other arm out of the way and the real clock back --
+        # a per-arm file is not rebased, since there is nothing to rebase
+        # against.
+        variants: list[tuple[str, str, list[Event]]] = [(stem, title, group)]
+        for arm in sorted({e.arm for e in group if e.arm}):
+            variants.append((
+                f"{stem}__{arm}", f"{title} — {arm}",
+                [e for e in group if e.arm == arm],
+            ))
+
+        for variant_stem, variant_title, events_ in variants:
+            for suffix, body in (
+                (".mmd", combined_mermaid(events_, title=variant_title)),
+                (".md", combined_table(events_, title=variant_title)),
+            ):
+                path = out / f"{variant_stem}{suffix}"
+                path.write_text(body)
+                written.append(path)
     return written

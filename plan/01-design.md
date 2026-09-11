@@ -456,8 +456,9 @@ $BENCH_ROOT/<run_id>/
   state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
   prefetches.csv                              one row per phantom
   tools.csv                                   one row per leaf tool call
-  timelines/<question_id>__job<n>.mmd          Mermaid Gantt, every arm together
-  timelines/<question_id>__job<n>.md           per-call table + per-arm counts
+  timelines/<question_id>__job<n>.mmd          every arm on one axis
+  timelines/<question_id>__job<n>__<arm>.mmd   one arm, true wall clock
+  timelines/<question_id>__job<n>[__<arm>].md  per-call table + counts
   <arm>/<question_id>/rep<k>/
       metrics.json  server.log  workflow.log
       stats/finished_requests_engine0_*.jsonl
@@ -493,6 +494,13 @@ waited longer to start here" are different findings. A phase that does not
 exist is omitted rather than written as zero: a phantom runs no sampling step,
 so `d 0.00s` would report a measurement that was never taken. The `.md` carries
 the same three as columns.
+
+Both a comparison chart and a per-arm one are written for each question, because
+they answer different questions. "What differs" needs the arms on one axis;
+"what did this arm do" needs the other arm out of the way and the real clock
+back. Rebasing is a no-op on a single arm — its own origin is the base — so the
+per-arm file keeps true wall-clock stamps through the same code path, and the
+title only claims a rebase when there was one to do.
 
 Two things follow from the unit being the question rather than the cell. A batch
 cell is N questions in one process, so splitting on `job_id` is what keeps them

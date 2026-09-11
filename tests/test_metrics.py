@@ -474,8 +474,23 @@ def check_run_timeline(tmp: Path) -> None:
 
     written = timeline.write_run(run)
     names = sorted(p.name for p in written)
-    assert names == ["batch2__job1.md", "batch2__job1.mmd",
-                     "batch2__job2.md", "batch2__job2.mmd"], names
+    assert names == [
+        "batch2__job1.md", "batch2__job1.mmd",
+        "batch2__job1__baseline.md", "batch2__job1__baseline.mmd",
+        "batch2__job1__ours.md", "batch2__job1__ours.mmd",
+        "batch2__job2.md", "batch2__job2.mmd",
+        "batch2__job2__baseline.md", "batch2__job2__baseline.mmd",
+        "batch2__job2__ours.md", "batch2__job2__ours.mmd",
+    ], names
+
+    # A per-arm file holds that arm only, and keeps true wall-clock times: with
+    # one arm there is nothing to rebase against, so the title does not claim a
+    # rebase and the stamps are the engine's own.
+    solo = (run / "timelines" / "batch2__job1__baseline.mmd").read_text()
+    assert "section ours · " not in solo, solo
+    assert "rebased" not in solo, solo
+    solo_start = next(ln.split(", ")[-2] for ln in solo.splitlines() if ":active," in ln)
+    assert solo_start.startswith("20"), solo_start
 
     body = (run / "timelines" / "batch2__job1.mmd").read_text()
     # The arm with no agent id must still be drawn, on the same lane name.
