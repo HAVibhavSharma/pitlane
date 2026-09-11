@@ -93,6 +93,51 @@ def _read_glob(directory: Path, pattern: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _routing_lines(cell: Path) -> dict[str, dict[str, str]]:
+    """`request_id -> {agent_id, langgraph_node, job_id, ...}` from the log.
+
+    Where a build does not carry the client's routing fields into the engine,
+    its stats rows are anonymous and the API layer states them instead, once
+    per request, at the point the body still exists. The id logged there is the
+    one handed to `generate`, which is the one the stats row is keyed by, so
+    the join is exact rather than a match on time.
+    """
+    log = cell / "server.log"
+    if not log.exists():
+        return {}
+    routing: dict[str, dict[str, str]] = {}
+    for line in log.read_text(errors="replace").splitlines():
+        if "request_routing:" not in line:
+            continue
+        fields = dict(_ECHO_FIELD.findall(line.split("request_routing:", 1)[1]))
+        request_id = fields.pop("request_id", "")
+        if request_id:
+            routing[request_id] = fields
+    return routing
+
+
+def _apply_routing(rows: list[dict[str, Any]], cell: Path) -> None:
+    """Fill in routing fields the stats rows lack, from the log, in place.
+
+    Only ever fills a gap: a build that records the fields itself is the
+    authority on its own rows, and a log line must never overwrite one.
+    """
+    missing = [r for r in rows
+               if not r.get("agent_id") and not r.get("langgraph_node")]
+    if not missing:
+        return
+    routing = _routing_lines(cell)
+    if not routing:
+        return
+    for row in missing:
+        fields = routing.get(str(row.get("request_id") or ""))
+        if not fields:
+            continue
+        for key, value in fields.items():
+            if not row.get(key):
+                row[key] = value
+
+
 def _served_chats(cell: Path, t0: float | None, t1: float | None) -> int | None:
     """Chat completions the server's own access log says it answered.
 
@@ -385,6 +430,7 @@ def collect(
 
     stats_dir = cell / "stats"
     rows = _window(_read_glob(stats_dir, "finished_requests_engine*.jsonl"), t0, t1)
+    _apply_routing(rows, cell)
     real = [r for r in rows if not r.get("prefetch_only")]
     phantom = [r for r in rows if r.get("prefetch_only")]
     metrics.requests = len(real)

@@ -560,6 +560,55 @@ def check_truncated_stats(tmp: Path) -> None:
     print("\nall truncation assertions passed")
 
 
+def check_routing_from_log(tmp: Path) -> None:
+    """A build that logs routing instead of recording it still gets lanes.
+
+    The older fork does not carry `langgraph_node` into the engine, so its
+    stats rows are anonymous and every chat span was dropped off the chart.
+    The API layer states the same fields once per request against the id it
+    hands to `generate`, which is the id the stats row is keyed by.
+    """
+    cell = tmp / "continuum" / "q9" / "rep1"
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", [
+        dict(request_id="chatcmpl-aaa", job_id="1", arrival_ts=T0 + 1,
+             finish_ts=T0 + 5, num_prompt_tokens=5_000, num_cached_tokens=500,
+             num_generation_tokens=100),
+        dict(request_id="chatcmpl-bbb", job_id="1", arrival_ts=T0 + 10,
+             finish_ts=T0 + 15, num_prompt_tokens=6_000, num_cached_tokens=600,
+             num_generation_tokens=120),
+        # No line for this one: a gap stays a gap rather than borrowing.
+        dict(request_id="chatcmpl-ccc", job_id="1", arrival_ts=T0 + 20,
+             finish_ts=T0 + 25, num_prompt_tokens=7_000, num_cached_tokens=700,
+             num_generation_tokens=140),
+    ])
+    (cell / "server.log").write_text(
+        "(APIServer pid=1) INFO 2026-09-12 03:15:57.000 [serving_chat.py:257] "
+        "request_routing: request_id=chatcmpl-aaa job_id=1 "
+        "langgraph_node=supervisor\n"
+        "(APIServer pid=1) INFO 2026-09-12 03:16:07.000 [serving_chat.py:257] "
+        "request_routing: request_id=chatcmpl-bbb agent_id=langgraph:1:researcher "
+        "langgraph_node=researcher\n"
+    )
+
+    m = metrics.collect(cell, arm="continuum", question_id="q9", t0=T0, t1=T0 + 100)
+    by_id = {r["request_id"]: r for r in m.per_request}
+    assert by_id["chatcmpl-aaa"]["langgraph_node"] == "supervisor", by_id
+    assert by_id["chatcmpl-bbb"]["agent_id"] == "langgraph:1:researcher", by_id
+    assert by_id["chatcmpl-ccc"]["langgraph_node"] is None, by_id
+
+    # A build that records the fields itself is the authority on its own rows.
+    own = build_cell(tmp / "own")
+    (own / "server.log").write_text(
+        "(APIServer pid=1) INFO 2026-09-12 03:15:57.000 [serving_chat.py:257] "
+        "request_routing: request_id=r1 langgraph_node=WRONG\n"
+    )
+    kept = metrics.collect(own, arm="ours", question_id="q1", t0=T0, t1=T0 + 100)
+    node = next(r["langgraph_node"] for r in kept.per_request if r["request_id"] == "r1")
+    assert node == "research_supervisor", node
+    print("routing from log: 2 of 3 filled, recorded fields not overwritten")
+    print("\nall routing assertions passed")
+
+
 def check_run_timeline(tmp: Path) -> None:
     """Combined charts: every arm, split per question, each arm rebased.
 
@@ -709,4 +758,5 @@ if __name__ == "__main__":
         check_tool_spans(Path(tmp))
         check_unsplit_cached_tokens(Path(tmp))
         check_truncated_stats(Path(tmp))
+        check_routing_from_log(Path(tmp))
         check_run_timeline(Path(tmp))
