@@ -29,7 +29,8 @@ Two consequences of the request-row choice, both deliberate:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import csv
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -69,10 +70,13 @@ class Event:
 
     agent_id: str
     kind: str
-    index: int          # 1-based, chronological within (agent_id, kind)
+    index: int          # 1-based, chronological within (arm, agent_id, kind)
     start: float
     end: float
     name: str = ""      # tool name, for a tool span
+    arm: str = ""
+    job_id: str = ""
+    question_id: str = ""
 
     @property
     def duration_s(self) -> float:
@@ -108,30 +112,47 @@ def _stamp(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
+def _number(raw: list[Event]) -> list[Event]:
+    """Sort by time and number within `(arm, agent_id, kind)`.
+
+    Per arm, so a combined chart numbers `baseline` and `ours` independently --
+    `Chat #2` has to mean the same call in both or the comparison is unreadable.
+    """
+    raw.sort(key=lambda e: (e.start, e.end))
+    seen: dict[tuple[str, str, str], int] = {}
+    out: list[Event] = []
+    for event in raw:
+        key = (event.arm, event.agent_id, event.kind)
+        seen[key] = seen.get(key, 0) + 1
+        out.append(replace(event, index=seen[key]))
+    return out
+
+
 def events(metrics: Metrics) -> list[Event]:
-    """Every concrete-agent bar, in time order, numbered per agent and kind."""
-    rows: list[tuple[float, float, str, str, str]] = []
+    """Every concrete-agent bar for one cell, in time order."""
+    raw: list[Event] = []
     for entry in metrics.per_prefetch:
         if _concrete(entry.get("agent_id")) and entry.get("arrival_ts") is not None:
-            rows.append((entry["arrival_ts"], entry.get("finish_ts") or entry["arrival_ts"],
-                         entry["agent_id"], "prefetch", ""))
+            raw.append(Event(
+                entry["agent_id"], "prefetch", 0, entry["arrival_ts"],
+                entry.get("finish_ts") or entry["arrival_ts"], "",
+                metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
+            ))
     for entry in metrics.per_request:
         if _concrete(entry.get("agent_id")) and entry.get("arrival_ts") is not None:
-            rows.append((entry["arrival_ts"], entry.get("finish_ts") or entry["arrival_ts"],
-                         entry["agent_id"], "chat", ""))
+            raw.append(Event(
+                entry["agent_id"], "chat", 0, entry["arrival_ts"],
+                entry.get("finish_ts") or entry["arrival_ts"], "",
+                metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
+            ))
     for entry in metrics.per_tool:
         if _concrete(entry.get("agent_id")) and entry.get("start_ts") is not None:
-            rows.append((entry["start_ts"], entry.get("end_ts") or entry["start_ts"],
-                         entry["agent_id"], "tool", entry.get("tool") or "tool"))
-    rows.sort(key=lambda r: (r[0], r[1]))
-
-    seen: dict[tuple[str, str], int] = {}
-    out: list[Event] = []
-    for start, end, agent_id, kind, name in rows:
-        key = (agent_id, kind)
-        seen[key] = seen.get(key, 0) + 1
-        out.append(Event(agent_id, kind, seen[key], start, end, name))
-    return out
+            raw.append(Event(
+                entry["agent_id"], "tool", 0, entry["start_ts"],
+                entry.get("end_ts") or entry["start_ts"], entry.get("tool") or "tool",
+                metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
+            ))
+    return _number(raw)
 
 
 def mermaid(metrics: Metrics, *, title: str | None = None) -> str:
@@ -226,4 +247,176 @@ def write(timelines_dir: Path, metrics: Metrics) -> list[Path]:
         path = timelines_dir / f"{stem}{suffix}"
         path.write_text(body)
         written.append(path)
+    return written
+
+
+# -- run level --------------------------------------------------------------
+#
+# One cell's chart answers "what did this arm do". The question the study asks
+# is "what did the arms do differently", and that needs them on one axis --
+# which per-cell files cannot give, because each is written before the next arm
+# has run.
+#
+# The run-root CSVs already carry every span with its `arm`, `question_id` and
+# `job_id`, so the combined charts are a second read of those rather than a
+# second bookkeeping path. Regenerated after every cell, so a matrix that is
+# still running, or one that failed partway, still has whatever it produced.
+
+_CSV_KINDS = (
+    ("prefetches.csv", "prefetch", "arrival_ts", "finish_ts", None),
+    ("requests.csv", "chat", "arrival_ts", "finish_ts", None),
+    ("tools.csv", "tool", "start_ts", "end_ts", "tool"),
+)
+
+
+def _rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _float(value: str | None) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def run_events(run_dir: Path) -> list[Event]:
+    """Every span the run has produced so far, across arms, from the CSVs."""
+    raw: list[Event] = []
+    for name, kind, start_key, end_key, name_key in _CSV_KINDS:
+        for row in _rows(run_dir / name):
+            agent_id = row.get("agent_id") or ""
+            start = _float(row.get(start_key))
+            if not _concrete(agent_id) or start is None:
+                continue
+            raw.append(Event(
+                agent_id, kind, 0, start, _float(row.get(end_key)) or start,
+                (row.get(name_key) or "tool") if name_key else "",
+                row.get("arm") or "", str(row.get("job_id") or ""),
+                row.get("question_id") or "",
+            ))
+    return _number(raw)
+
+
+def _rebased(events_: list[Event]) -> tuple[list[Event], dict[str, float]]:
+    """Shift every arm to a common origin, and say by how much.
+
+    Arms run one after another, minutes or hours apart, so plotting them on
+    real clock time puts them side by side as distant blocks and compares
+    nothing. Each arm is rebased to its own first event, which is the only way
+    "the warm fires 88 ms before the call in one arm and not at all in the
+    other" is a thing you can see.
+
+    The shift is returned so the table can state it: these are not wall-clock
+    times any more, and a chart that silently pretends otherwise is worse than
+    one that does not exist.
+    """
+    origins: dict[str, float] = {}
+    for event in events_:
+        if event.arm not in origins or event.start < origins[event.arm]:
+            origins[event.arm] = event.start
+    base = min(origins.values()) if origins else 0.0
+    shifted = [
+        replace(event, start=event.start - origins[event.arm] + base,
+                end=event.end - origins[event.arm] + base)
+        for event in events_
+    ]
+    shifted.sort(key=lambda e: (e.arm, e.start, e.end))
+    return shifted, origins
+
+
+def combined_mermaid(events_: list[Event], *, title: str) -> str:
+    """One Gantt for several arms, sectioned `<arm> · <agent>`."""
+    shifted, _ = _rebased(events_)
+    lines = [
+        _INIT,
+        "gantt",
+        f"    title {title} (each arm rebased to its own start)",
+        "    dateFormat YYYY-MM-DD HH:mm:ss.SSS",
+        "    axisFormat %H:%M:%S",
+        "    todayMarker off",
+    ]
+    sections: list[tuple[str, str]] = []
+    for event in shifted:
+        key = (event.arm, event.agent_id)
+        if key not in sections:
+            sections.append(key)
+
+    task_id = 0
+    for arm, agent_id in sections:
+        lines += ["", f"    section {arm} · {_short(agent_id)}"]
+        for event in (e for e in shifted if e.arm == arm and e.agent_id == agent_id):
+            task_id += 1
+            tag, prefix = _STYLE[event.kind]
+            lines.append(
+                f"    {event.label} :{tag}, {prefix}{task_id}, "
+                f"{_stamp(event.start)}, {_stamp(event.end)}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def combined_table(events_: list[Event], *, title: str) -> str:
+    shifted, origins = _rebased(events_)
+    base = min(origins.values()) if origins else 0.0
+    lines = [f"# {title}", ""]
+    for arm in sorted({e.arm for e in shifted}):
+        chats = sum(1 for e in shifted if e.arm == arm and e.kind == "chat")
+        pf = sum(1 for e in shifted if e.arm == arm and e.kind == "prefetch")
+        tools = sum(1 for e in shifted if e.arm == arm and e.kind == "tool")
+        span = max((e.end for e in shifted if e.arm == arm), default=base) - base
+        lines.append(
+            f"- **{arm}**: {chats} chat, {pf} prefetch, {tools} tool "
+            f"— {span:.1f}s wall (t=0 is this arm's first event, "
+            f"{_stamp(origins[arm])})"
+        )
+    lines += [
+        "",
+        "| Arm | Agent ID | Type | Call # | Start (+s) | End (+s) | Duration |",
+        "|---|---|---|---:|---:|---:|---:|",
+    ]
+    for event in shifted:
+        duration = (
+            f"{event.duration_s:.3f} s" if event.kind == "chat"
+            else f"{event.duration_s * 1000:.1f} ms"
+        )
+        kind = f"{event.kind} {event.name}".strip()
+        lines.append(
+            f"| {event.arm} | {_short(event.agent_id)} | {kind} | {event.index} | "
+            f"{event.start - base:.3f} | {event.end - base:.3f} | {duration} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_run(run_dir: Path) -> list[Path]:
+    """One `.mmd` + `.md` per question, every arm together.
+
+    Split by `(question_id, job_id)` rather than by cell. A batch cell is N
+    questions in one process, so a per-cell file would lump them into a single
+    unreadable chart -- and the question, not the cell, is the unit anything is
+    compared at.
+    """
+    all_events = run_events(run_dir)
+    if not all_events:
+        return []
+    out = run_dir / "timelines"
+    out.mkdir(parents=True, exist_ok=True)
+
+    groups: dict[tuple[str, str], list[Event]] = {}
+    for event in all_events:
+        groups.setdefault((event.question_id, event.job_id), []).append(event)
+
+    written: list[Path] = []
+    for (question, job), group in sorted(groups.items()):
+        stem = f"{question}__job{job}" if job else str(question)
+        title = f"{question} / job {job}" if job else str(question)
+        for suffix, body in (
+            (".mmd", combined_mermaid(group, title=title)),
+            (".md", combined_table(group, title=title)),
+        ):
+            path = out / f"{stem}{suffix}"
+            path.write_text(body)
+            written.append(path)
     return written

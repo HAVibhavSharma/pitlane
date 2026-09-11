@@ -569,6 +569,14 @@ def _lead_markers(metrics: Metrics, cell: Path, real: list[dict[str, Any]]) -> N
         )
 
 
+def _job_of(agent_id: str | None) -> str | None:
+    """The job id inside an `agent_id` of the form `langgraph:<job>:<path>`."""
+    if not agent_id:
+        return None
+    parts = agent_id.split(":")
+    return parts[1] if len(parts) > 2 else None
+
+
 def _tool_spans(metrics: Metrics, cell: Path) -> None:
     """Pair `tool_start` / `tool_end` markers into one span per tool call.
 
@@ -610,8 +618,12 @@ def _tool_spans(metrics: Metrics, cell: Path) -> None:
             metrics.unmatched_tool_markers += 1
             continue
         begin, opening = started
+        agent_id = opening.get("agent_id") or fields.get("agent_id")
         metrics.per_tool.append({
-            "agent_id": opening.get("agent_id") or fields.get("agent_id"),
+            # `langgraph:<job>:<path>` -- the marker does not carry `job_id`
+            # separately, and the timeline has to group by question.
+            "job_id": _job_of(agent_id),
+            "agent_id": agent_id,
             "tool": opening.get("tool") or fields.get("tool"),
             "call_id": call_id,
             "start_ts": begin,

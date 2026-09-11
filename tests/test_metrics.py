@@ -433,6 +433,64 @@ def check_tool_spans(tmp: Path) -> None:
     print("\nall tool-span assertions passed")
 
 
+def check_run_timeline(tmp: Path) -> None:
+    """Combined charts: every arm, split per question, each arm rebased."""
+    import csv as _csv
+    from pitlane import timeline
+
+    run = tmp / "runtl"
+    run.mkdir(parents=True, exist_ok=True)
+    base = 1_800_000_000.0
+    sup = "langgraph:{j}:research_supervisor:supervisor"
+    reqs, pfs = [], []
+    # `ours` ran 2.5 hours after `baseline`: on real clock time the two would
+    # be distant blocks, which is the thing rebasing exists to fix.
+    for arm, offset in (("baseline", 0.0), ("ours", 9000.0)):
+        for job in (1, 2):
+            t = base + offset + (job - 1) * 100
+            reqs.append(dict(arm=arm, question_id="batch2", rep=1, job_id=job,
+                             agent_id=sup.format(j=job), arrival_ts=t, finish_ts=t + 4))
+            if arm == "ours":
+                pfs.append(dict(arm=arm, question_id="batch2", rep=1, job_id=job,
+                                agent_id=sup.format(j=job),
+                                arrival_ts=t - 0.088, finish_ts=t - 0.069))
+    for name, rows in (("requests.csv", reqs), ("prefetches.csv", pfs)):
+        cols = ["arm", "question_id", "rep", "job_id", "agent_id",
+                "arrival_ts", "finish_ts"]
+        with (run / name).open("w", newline="") as handle:
+            writer = _csv.DictWriter(handle, fieldnames=cols)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    written = timeline.write_run(run)
+    names = sorted(p.name for p in written)
+    assert names == ["batch2__job1.md", "batch2__job1.mmd",
+                     "batch2__job2.md", "batch2__job2.mmd"], names
+
+    body = (run / "timelines" / "batch2__job1.mmd").read_text()
+    assert "section baseline · " in body and "section ours · " in body, body
+    # job 2 must not leak into job 1's chart
+    assert ":2:" not in body.split("gantt")[1], body
+    # Rebasing: each arm's first event lands on the same stamp, though the two
+    # arms ran 2.5 hours apart. Without it the chart compares nothing.
+    firsts = {}
+    arm = None
+    for line in body.splitlines():
+        if line.strip().startswith("section "):
+            arm = line.split("section ", 1)[1].split(" · ")[0]
+        elif ":active," in line or ":crit," in line:
+            firsts.setdefault(arm, line.split(", ")[-2])
+    assert set(firsts) == {"baseline", "ours"}, firsts
+    assert len(set(firsts.values())) == 1, firsts
+
+    table = (run / "timelines" / "batch2__job1.md").read_text()
+    assert "**baseline**" in table and "**ours**" in table
+    assert "t=0 is this arm's first event" in table
+    print("run timeline:", names)
+    print("\nall run-timeline assertions passed")
+
+
 def check_timeline(tmp: Path) -> None:
     from pitlane import timeline
 
@@ -485,3 +543,4 @@ if __name__ == "__main__":
         check_lead_markers(Path(tmp))
         check_timeline(Path(tmp))
         check_tool_spans(Path(tmp))
+        check_run_timeline(Path(tmp))

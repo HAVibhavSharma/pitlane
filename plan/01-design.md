@@ -450,8 +450,8 @@ $BENCH_ROOT/<run_id>/
   state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
   prefetches.csv                              one row per phantom
   tools.csv                                   one row per leaf tool call
-  timelines/<arm>__<question_id>__rep<k>.mmd   Mermaid Gantt of the cell
-  timelines/<arm>__<question_id>__rep<k>.md    per-call table + counts
+  timelines/<question_id>__job<n>.mmd          Mermaid Gantt, every arm together
+  timelines/<question_id>__job<n>.md           per-call table + per-arm counts
   <arm>/<question_id>/rep<k>/
       metrics.json  server.log  workflow.log
       stats/finished_requests_engine0_*.jsonl
@@ -459,8 +459,8 @@ $BENCH_ROOT/<run_id>/
       divergence.jsonl  agent_prefetch.jsonl
 ```
 
-`timelines/` is the shape the tables cannot show: one Mermaid Gantt per cell,
-one section per agent id, `:crit` (orange) for a phantom, `:active` (blue)
+`timelines/` is the shape the tables cannot show: one Mermaid Gantt **per
+question**, with **every arm in it**, sectioned `<arm> · <agent id>`, `:crit` (orange) for a phantom, `:active` (blue)
 for a chat completion and `:done` (green) for a leaf tool span. Three is the
 ceiling: Mermaid has four task styles and the fourth, `milestone`, renders as a
 point rather than a bar. Built from the same request rows as everything else --
@@ -475,7 +475,23 @@ never merged -- each row is its own numbered task, so three concurrent
 or not at all, so the duration goes in the task name instead. Stretching the bar
 would make the picture legible and the data wrong. The `.md` beside it carries
 the same events as a table, with the call counts the diagram has to agree with,
-rendered from one `events()` list so the two cannot drift apart.
+rendered from one event list so the two cannot drift apart.
+
+Two things follow from the unit being the question rather than the cell. A batch
+cell is N questions in one process, so splitting on `job_id` is what keeps them
+from being lumped into one unreadable chart -- and the question is the unit
+anything is compared at anyway. And the arms have to share an axis: they run
+minutes or hours apart, so plotting real clock time puts them side by side as
+distant blocks and compares nothing. Each arm is rebased to its own first event,
+which is the only way "the warm fires 88 ms before the call in one arm and not
+at all in the other" is a thing that can be seen. The `.md` states the shift and
+each arm's true origin, because these are no longer wall-clock times and a chart
+that silently pretends otherwise is worse than one that does not exist.
+
+The charts are regenerated from the run-root CSVs after every cell rather than
+written once per cell, so they are a second read of data that already exists
+rather than a second bookkeeping path -- and a matrix that is still running, or
+that failed partway, still has whatever it produced.
 
 Both request levels carry their phase split — `queued_s`, `prefill_s`,
 `decode_s` — beside the token counts, so a slower cell can be read as queueing,

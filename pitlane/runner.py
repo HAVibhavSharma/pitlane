@@ -102,7 +102,8 @@ def run_cell(
     report.append_request_rows(config.run_dir / "requests.csv", collected)
     report.append_prefetch_rows(config.run_dir / "prefetches.csv", collected)
     report.append_tool_rows(config.run_dir / "tools.csv", collected)
-    timeline.write(config.run_dir / "timelines", collected)
+    # After the CSVs, since the combined charts are read back out of them.
+    timeline.write_run(config.run_dir)
     report.write_summary(config.run_dir)
 
     if not keep_stack and not reuse_stack and not dry_run:

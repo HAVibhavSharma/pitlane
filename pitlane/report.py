@@ -155,7 +155,7 @@ def append_prefetch_rows(prefetches_csv: Path, metrics: Metrics) -> None:
 
 
 _TOOL_COLUMNS = [
-    "arm", "question_id", "rep", "agent_id", "tool", "call_id",
+    "arm", "question_id", "rep", "job_id", "agent_id", "tool", "call_id",
     "start_ts", "end_ts", "elapsed_s",
 ]
 
