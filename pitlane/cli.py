@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pitlane import arms as arms_mod
 from pitlane import metrics as metrics_mod
-from pitlane import preflight, report, runner
+from pitlane import preflight, report, runner, stack
 from pitlane.config import Config, ConfigError
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +125,12 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_down(args: argparse.Namespace) -> int:
+    """Tear down whatever a previous run left behind."""
+    stack.down(_load_config(args))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pitlane", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -133,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("arms", help="list configured stacks").set_defaults(func=cmd_arms)
+    sub.add_parser(
+        "down", help="kill any vLLM/LMCache pitlane left running",
+    ).set_defaults(func=cmd_down)
 
     pre = sub.add_parser("preflight", help="check the machine can host a run")
     pre.add_argument("--arm", help="include arm-specific checks (redis, lmcache port)")

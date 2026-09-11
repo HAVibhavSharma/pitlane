@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shlex
 import shutil
+import signal
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -76,7 +80,7 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
     an arm that wants a warm cache across cells needs the disk tier.
     """
     tmux.kill(LMCACHE_SESSION)
-    _wait_port_free(config.lmcache_port, timeout_s=60)
+    _free_port(config.lmcache_port)
 
     venv = lmcache_venv(config, arm)
     target = config.paths.lmcache_l2_dir
@@ -117,7 +121,7 @@ def stop_lmcache(config: Config | None = None) -> None:
     """
     tmux.kill(LMCACHE_SESSION)
     if config is not None:
-        _wait_port_free(config.lmcache_port, timeout_s=60)
+        _free_port(config.lmcache_port)
 
 
 # -- vLLM ------------------------------------------------------------------
@@ -146,17 +150,24 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
         f"{args} > {shlex.quote(str(log_path))} 2>&1"
     )
     tmux.kill(VLLM_SESSION)
-    _wait_port_free(config.port, timeout_s=120)
+    # Reclaim rather than merely wait: a previous run killed by Ctrl-C leaves an
+    # orphan that will never exit, and these ports are pitlane's own.
+    _free_port(config.port, grace_s=30, kill_s=30)
     tmux.start(VLLM_SESSION, command, cwd=str(repo), env=env)
     wait_ready(config, log_path)
     return log_path
 
 
 def stop_server(config: Config) -> None:
+    """Kill the session and make sure the server is actually gone.
+
+    VRAM is released asynchronously, so the next arm's boot fails confusingly if
+    it starts while the old process is still tearing down -- but waiting is only
+    correct while something is still tearing down. An orphaned server never
+    exits, and the old 300 s wait sat there watching it.
+    """
     tmux.kill(VLLM_SESSION)
-    # VRAM is released asynchronously; the next arm's boot fails confusingly if
-    # it starts while the old process is still tearing down.
-    _wait_port_free(config.port, timeout_s=300)
+    _free_port(config.port, grace_s=60, kill_s=30)
 
 
 def wait_ready(config: Config, log_path: Path) -> None:
@@ -226,10 +237,109 @@ def _wait_port_open(port: int, timeout_s: float) -> None:
     raise StackError(f"nothing listening on port {port} after {timeout_s:.0f}s")
 
 
-def _wait_port_free(port: int, timeout_s: float) -> None:
-    deadline = time.time() + timeout_s
+_SS_PID = re.compile(r"pid=(\d+)")
+
+
+def _listeners(port: int) -> list[int]:
+    """PIDs listening on `port`, via whichever of lsof/ss is installed."""
+    if shutil.which("lsof"):
+        out = subprocess.run(
+            ["lsof", "-t", "-i", f":{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True,
+        )
+        pids = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+        if pids:
+            return pids
+    if shutil.which("ss"):
+        out = subprocess.run(
+            ["ss", "-lptnH", f"sport = :{port}"], capture_output=True, text=True,
+        )
+        return sorted({int(m) for m in _SS_PID.findall(out.stdout)})
+    return []
+
+
+def _signal_listeners(port: int, sig: int) -> int:
+    """Signal the *process group* of everything listening on `port`.
+
+    The group, not the process. `tmux.start` sends its command with `send-keys`,
+    so the pane holds a shell and the server is its child -- `kill-session`
+    reaps the shell and orphans the server, which goes on holding the port. The
+    server's own children are worse: vLLM's EngineCore is a separate process
+    that holds no port at all, so signalling only the listener leaves it alive
+    with the GPU memory still mapped, and the next arm boots onto a card that
+    is not free. Job control puts the whole tree in one group, so the group is
+    the unit that actually corresponds to "this server".
+    """
+    own_group = os.getpgid(0)
+    signalled = 0
+    for pid in _listeners(port):
+        try:
+            group = os.getpgid(pid)
+        except ProcessLookupError:
+            continue
+        if group == own_group:
+            # Would take pitlane down with it. Only reachable if a server was
+            # started outside tmux from this very shell.
+            logger.warning("pid %d on port %d shares our process group; "
+                           "not signalling", pid, port)
+            continue
+        try:
+            os.killpg(group, sig)
+            signalled += 1
+        except (ProcessLookupError, PermissionError) as exc:
+            logger.warning("could not signal group %d on port %d: %s",
+                           group, port, exc)
+    return signalled
+
+
+def _free_port(port: int, *, grace_s: float = 20.0, kill_s: float = 20.0) -> None:
+    """Get `port` released, escalating only as far as it has to.
+
+    Waiting alone is what the stop paths used to do, and it hangs for the full
+    timeout against an orphan that is never going to exit -- which is a worse
+    failure than not stopping at all, because it looks like the shutdown is
+    progressing.
+    """
+    deadline = time.time() + grace_s
     while time.time() < deadline:
         if not _port_open(port):
             return
-        time.sleep(2)
-    raise StackError(f"port {port} still in use after {timeout_s:.0f}s")
+        time.sleep(1)
+
+    if _signal_listeners(port, signal.SIGTERM):
+        logger.info("port %d still held; sent SIGTERM", port)
+    deadline = time.time() + kill_s
+    while time.time() < deadline:
+        if not _port_open(port):
+            return
+        time.sleep(1)
+
+    if _signal_listeners(port, signal.SIGKILL):
+        logger.warning("port %d still held; sent SIGKILL", port)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not _port_open(port):
+            return
+        time.sleep(1)
+    raise StackError(
+        f"port {port} still in use after SIGKILL; something is holding it that "
+        f"pitlane did not start"
+    )
+
+
+def down(config: Config) -> None:
+    """Tear down everything pitlane starts, and confirm the ports are free.
+
+    For the state a Ctrl-C leaves behind. Killing the tmux sessions is not
+    enough on its own -- that is the whole reason the orphans exist -- so this
+    goes through the same escalation the stop paths use, which also releases
+    the VRAM an orphaned EngineCore is still holding.
+    """
+    tmux.kill(VLLM_SESSION)
+    tmux.kill(LMCACHE_SESSION)
+    for port, label in ((config.port, "vllm"), (config.lmcache_port, "lmcache")):
+        if _port_open(port):
+            logger.info("reclaiming port %d (%s)", port, label)
+            _free_port(port, grace_s=5, kill_s=15)
+        else:
+            logger.info("port %d (%s) already free", port, label)

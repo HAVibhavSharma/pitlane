@@ -40,6 +40,7 @@ tool reads is listed there, one file, gitignored. Secrets may stay in
 ```bash
 cp example.env .env && $EDITOR .env
 pitlane preflight --arm ours     # checks the repos, venvs, GPU, RAM and ports
+pitlane down                     # kill anything a previous run left running
 ```
 
 The four `*_VENV` keys are the ones worth getting right: each vLLM build has
