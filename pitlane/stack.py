@@ -106,8 +106,18 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
     logger.info("LMCache up on port %s", config.lmcache_port)
 
 
-def stop_lmcache() -> None:
+def stop_lmcache(config: Config | None = None) -> None:
+    """Kill the session and wait for the port, like `stop_server` already did.
+
+    Killing the tmux session returns immediately; the process still has to run
+    down and release 10903. The next arm's preflight starts within
+    milliseconds, sees the port bound and refuses to run -- so a matrix would
+    complete its first arm and fail every one after it, reporting a stale
+    server as the operator's fault.
+    """
     tmux.kill(LMCACHE_SESSION)
+    if config is not None:
+        _wait_port_free(config.lmcache_port, timeout_s=60)
 
 
 # -- vLLM ------------------------------------------------------------------

@@ -35,7 +35,11 @@ RUN_ID="${RUN_ID:-batch${N}_$(date +%Y%m%d_%H%M%S)}"
 if [ -f .env ]; then
   set -a; . ./.env; set +a
 fi
-TRACE="${TRACE:-${TRACE_DIR:?set TRACE_DIR in .env or pass TRACE=}/odr_n${N}.jsonl}"
+# ODR_TRACE_PATH if it is set, else one named after N. Naming by N matters:
+# the workflow picks its questions with `random.Random(0).sample(examples, N)`,
+# and the sample for one N is not a subset of another's, so a trace can only be
+# replayed at the N it was recorded at.
+TRACE="${TRACE:-${ODR_TRACE_PATH:-${TRACE_DIR:?set TRACE_DIR or ODR_TRACE_PATH in .env, or pass TRACE=}/odr_n${N}.jsonl}}"
 
 echo "run id : $RUN_ID"
 echo "arms   : $ARMS"
@@ -70,11 +74,15 @@ for arm in $ARMS; do
   pitlane run \
     --arms "$arm" \
     --questions "batch${N}" \
+    --count "$N" \
     --reps 1 \
     --trace "$TRACE" \
     --run-id "$RUN_ID" || { echo "arm $arm exited non-zero" >&2; status=1; }
 done
 
+# Required rather than defaulted: this path has to be the one pitlane itself
+# resolved, and a default here can silently disagree with the tool's -- which
+# reports on an empty directory while the real results sit somewhere else.
 echo
-pitlane report "${BENCH_ROOT:-/disk2/vibhav/bench}/$RUN_ID"
+pitlane report "${BENCH_ROOT:?set BENCH_ROOT in .env}/$RUN_ID"
 exit "$status"

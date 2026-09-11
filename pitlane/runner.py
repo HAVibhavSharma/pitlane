@@ -8,6 +8,7 @@ collected before anything is killed.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,7 +56,7 @@ def run_cell(
         else:
             # Continuum drives LMCache in-process; a stray server on 10903
             # would be a second, invisible cache tier.
-            stack.stop_lmcache()
+            stack.stop_lmcache(config)
         stack.start_server(config, arm, cell)
 
     if not dry_run:
@@ -89,11 +90,32 @@ def run_cell(
     if not keep_stack and not reuse_stack and not dry_run:
         stack.stop_server(config)
         if arm.lmcache_server:
-            stack.stop_lmcache()
+            stack.stop_lmcache(config)
 
     for warning in collected.warnings:
         logger.warning("%s/%s: %s", arm.name, question_id, warning)
     return CellResult(arm.name, question_id, rep, cell, collected, result.exit_code)
+
+
+_BATCH_ID = re.compile(r"^batch(\d+)$")
+
+
+def question_count(question_id: str, override: int | None = None) -> int:
+    """How many questions the workflow should run for this cell.
+
+    The workflow cannot be asked for a *specific* question -- ODR selects with
+    `random.Random(0).sample(examples, N)` -- so N is the only handle there is,
+    and it has to match the N the trace was recorded at. The sample for N=1 is
+    not a subset of the sample for N=2, so a mismatch is not a smaller run: it
+    is a different question, and every request misses the trace.
+
+    `batch<N>` carries its own N, which is the convention the runbook already
+    uses. Anything else is one question unless `--count` says otherwise.
+    """
+    if override is not None:
+        return override
+    match = _BATCH_ID.match(question_id)
+    return int(match.group(1)) if match else 1
 
 
 def run_matrix(
@@ -103,6 +125,7 @@ def run_matrix(
     arms: list[str],
     questions: list[str],
     reps: int = 1,
+    count: int | None = None,
     dry_run: bool = False,
     keep_stack: bool = False,
 ) -> list[CellResult]:
@@ -113,12 +136,15 @@ def run_matrix(
     """
     results: list[CellResult] = []
     for question in questions:
+        cell_count = question_count(question, count)
         for rep in range(1, reps + 1):
             for arm_name in arms:
                 started = time.time()
                 results.append(
                     run_cell(
                         config, registry[arm_name], question, rep,
+                        count=cell_count,
+                        cache_state="warm" if cell_count > 1 else "cold",
                         dry_run=dry_run, keep_stack=keep_stack,
                     )
                 )

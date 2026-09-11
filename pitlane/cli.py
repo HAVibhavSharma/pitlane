@@ -100,7 +100,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     results = runner.run_matrix(
         config, registry,
-        arms=arm_names, questions=questions, reps=args.reps,
+        arms=arm_names, questions=questions, reps=args.reps, count=args.count,
         dry_run=args.dry_run, keep_stack=args.keep_stack,
     )
     path = report.write_summary(config.run_dir)
@@ -151,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--arms", help="comma separated; default every measurement arm")
     run.add_argument("--questions", required=True, help="comma separated question ids")
     run.add_argument("--reps", type=int, default=1)
+    run.add_argument(
+        "--count", type=int,
+        help="questions per cell; defaults to the N in a `batchN` id, else 1. "
+             "Must match the N the trace was recorded at -- the workflow picks "
+             "its questions by sampling N, so a different N is a different set.",
+    )
     run.add_argument("--trace", help="override ODR_TRACE_PATH")
     run.add_argument("--keep-stack", action="store_true", help="leave the last stack up")
     run.add_argument("--skip-preflight", action="store_true")
