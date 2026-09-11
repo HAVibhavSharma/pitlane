@@ -73,11 +73,12 @@ def cmd_record(args: argparse.Namespace) -> int:
         print(f"{config.trace_path} already exists; pass --force to record over it",
               file=sys.stderr)
         return 1
-    result = runner.run_cell(
-        config, registry["record"], question_id="record", rep=1,
-        trace_mode="record", count=args.questions, keep_stack=args.keep_stack,
-        dry_run=args.dry_run,
-    )
+    with _teardown_on_exit(config, args.keep_stack):
+        result = runner.run_cell(
+            config, registry["record"], question_id="record", rep=1,
+            trace_mode="record", count=args.questions, keep_stack=args.keep_stack,
+            dry_run=args.dry_run,
+        )
     print(f"trace: {config.trace_path}")
     return result.exit_code
 
@@ -98,11 +99,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(check, file=sys.stderr)
             return 1
 
-    results = runner.run_matrix(
-        config, registry,
-        arms=arm_names, questions=questions, reps=args.reps, count=args.count,
-        dry_run=args.dry_run, keep_stack=args.keep_stack,
-    )
+    with _teardown_on_exit(config, args.keep_stack):
+        results = runner.run_matrix(
+            config, registry,
+            arms=arm_names, questions=questions, reps=args.reps, count=args.count,
+            dry_run=args.dry_run, keep_stack=args.keep_stack,
+        )
     path = report.write_summary(config.run_dir)
     print(f"\n{len(results)} cell(s) -> {config.run_dir}")
     print(path.read_text())
@@ -123,6 +125,39 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(report.summary(run_dir / "results.csv"))
     report.write_summary(run_dir)
     return 0
+
+
+def _teardown_on_exit(config: Config, keep_stack: bool):
+    """Context manager: leave no server running unless asked to.
+
+    An interrupt is where this matters. `stop_server` kills the tmux session
+    first and only then waits, so a Ctrl-C anywhere after that point loses the
+    only handle anything had on the process -- pitlane exits, vLLM and LMCache
+    keep running, and the card stays occupied with nothing on screen to say so.
+    The next run then fails preflight on a port it started itself.
+
+    `--keep-stack` is honoured: leaving the stack up is a deliberate debugging
+    choice, and an interrupt should not silently reverse it.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def guard():
+        try:
+            yield
+        except KeyboardInterrupt:
+            if keep_stack:
+                print("\ninterrupted; leaving the stack up (--keep-stack)",
+                      file=sys.stderr)
+                raise
+            print("\ninterrupted; tearing down the stack", file=sys.stderr)
+            try:
+                stack.down(config)
+            except Exception as exc:  # noqa: BLE001 - already on the way out
+                print(f"teardown failed: {exc}; run `pitlane down`",
+                      file=sys.stderr)
+            raise
+    return guard()
 
 
 def cmd_down(args: argparse.Namespace) -> int:
@@ -200,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # The teardown has already run; this is only to exit without dumping a
+        # traceback whose top frame is `time.sleep`.
+        return 130
 
 
 if __name__ == "__main__":
