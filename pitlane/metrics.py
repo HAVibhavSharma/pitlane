@@ -352,10 +352,37 @@ def collect(
     return metrics
 
 
+def _cached_tokens(row: dict[str, Any]) -> int:
+    """Prompt tokens this request did not have to prefill.
+
+    `num_local_cached_tokens` where the build splits local from external, and
+    the older single `num_cached_tokens` where it does not. The older field is
+    the *sum* of the two -- the scheduler sets it from
+    `num_new_local_computed_tokens + num_external_computed_tokens` -- so on such
+    a build this column is local+external and `external_token_hits` is
+    unknowable rather than zero. `_token_metrics` says so in a warning; without
+    the fallback the arm reports no hits at all, which is worse than reporting
+    a total that is labelled.
+    """
+    local = row.get("num_local_cached_tokens")
+    if local is not None:
+        return local or 0
+    return row.get("num_cached_tokens") or 0
+
+
+def _splits_cached_tokens(real: list[dict[str, Any]]) -> bool:
+    return any(r.get("num_local_cached_tokens") is not None for r in real)
+
+
 def _token_metrics(metrics: Metrics, real: list[dict[str, Any]]) -> None:
     metrics.query_tokens = sum(r.get("num_prompt_tokens") or 0 for r in real)
-    metrics.token_hits = sum(r.get("num_local_cached_tokens") or 0 for r in real)
+    metrics.token_hits = sum(_cached_tokens(r) for r in real)
     metrics.external_token_hits = sum(r.get("num_external_cached_tokens") or 0 for r in real)
+    if real and not _splits_cached_tokens(real):
+        metrics.warnings.append(
+            "build reports only num_cached_tokens: token_hits is local+"
+            "external and external_token_hits is unknown, not zero"
+        )
     metrics.workflow_output_tokens = sum(r.get("num_generation_tokens") or 0 for r in real)
     if metrics.query_tokens:
         metrics.kv_hit_rate = metrics.token_hits / metrics.query_tokens
@@ -398,7 +425,7 @@ def _requests(metrics: Metrics, real: list[dict[str, Any]]) -> None:
             arrival_ts=row.get("arrival_ts"),
             finish_ts=row.get("finish_ts"),
             query_tokens=row.get("num_prompt_tokens") or 0,
-            token_hits=row.get("num_local_cached_tokens") or 0,
+            token_hits=_cached_tokens(row),
             external_token_hits=row.get("num_external_cached_tokens") or 0,
             output_tokens=row.get("num_generation_tokens") or 0,
             queued_s=_interval(row.get("queued_time")),

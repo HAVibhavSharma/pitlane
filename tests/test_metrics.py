@@ -477,6 +477,45 @@ def check_tool_spans(tmp: Path) -> None:
     print("\nall tool-span assertions passed")
 
 
+def check_unsplit_cached_tokens(tmp: Path) -> None:
+    """An older build reports one `num_cached_tokens` and no local/external split.
+
+    Reading only the split field made the whole arm look like it served no
+    cached tokens at all -- 0 hits against a real prompt count -- which is the
+    same shape as a genuinely cold cache and cannot be told apart from one.
+    """
+    cell = tmp / "continuum" / "q7" / "rep1"
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", [
+        dict(request_id="r1", job_id="j1", arrival_ts=T0 + 1, finish_ts=T0 + 9,
+             queued_time=0.2, prefill_time=0.3, decode_time=7.5,
+             num_prompt_tokens=10_000, num_cached_tokens=4_000,
+             num_generation_tokens=300),
+        dict(request_id="r2", job_id="j1", arrival_ts=T0 + 10, finish_ts=T0 + 20,
+             queued_time=0.1, prefill_time=0.4, decode_time=9.0,
+             num_prompt_tokens=20_000, num_cached_tokens=6_000,
+             num_generation_tokens=500),
+    ])
+
+    m = metrics.collect(cell, arm="continuum", question_id="q7", t0=T0, t1=T0 + 100)
+    assert m.requests == 2, m.requests
+    assert m.query_tokens == 30_000, m.query_tokens
+    assert m.token_hits == 10_000, m.token_hits
+    assert abs(m.kv_hit_rate - 1 / 3) < 1e-9, m.kv_hit_rate
+    # The single field is local+external, so zero external is not a measurement.
+    assert any("local+external" in w for w in m.warnings), m.warnings
+    assert [r["token_hits"] for r in m.per_request] == [4_000, 6_000]
+
+    # A split build keeps its exact meaning, and says nothing.
+    split = metrics.collect(build_cell(tmp / "split"), arm="ours",
+                            question_id="q1", t0=T0, t1=T0 + 100)
+    assert split.token_hits == 10_000, split.token_hits
+    assert split.external_token_hits == 1_000, split.external_token_hits
+    assert not any("local+external" in w for w in split.warnings), split.warnings
+    print("unsplit build: hits", m.token_hits, "of", m.query_tokens,
+          "tokens, flagged as local+external")
+    print("\nall cached-token assertions passed")
+
+
 def check_run_timeline(tmp: Path) -> None:
     """Combined charts: every arm, split per question, each arm rebased.
 
@@ -624,4 +663,5 @@ if __name__ == "__main__":
         check_lead_markers(Path(tmp))
         check_timeline(Path(tmp))
         check_tool_spans(Path(tmp))
+        check_unsplit_cached_tokens(Path(tmp))
         check_run_timeline(Path(tmp))
