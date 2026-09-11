@@ -138,6 +138,23 @@ def question_count(question_id: str, override: int | None = None) -> int:
     return int(match.group(1)) if match else 1
 
 
+def _cache_state(count: int, arm: Arm) -> str:
+    """`cold` unless later questions in this cell inherit an earlier one's HBM.
+
+    The flag alone is not enough to claim it. `--hbm-flush-between-queries` is
+    gated in the workflow on `--no-kv-metrics-reset`, because the flush is a
+    parameter of the reset endpoint -- so an arm that disables resets passes the
+    flag and flushes nothing, and trusting the flag would report those cells as
+    isolated when they are not.
+    """
+    if count == 1:
+        return "cold"
+    args = arm.workflow_args
+    flushes = ("--hbm-flush-between-queries" in args
+               and "--no-kv-metrics-reset" not in args)
+    return "cold" if flushes else "warm"
+
+
 def run_matrix(
     config: Config,
     registry: Registry,
@@ -164,7 +181,12 @@ def run_matrix(
                     run_cell(
                         config, registry[arm_name], question, rep,
                         count=cell_count,
-                        cache_state="warm" if cell_count > 1 else "cold",
+                        # A batch cell's later questions are only warm if the
+                        # workflow does not flush between them. With the flush
+                        # on every question starts cold, and saying otherwise
+                        # would make the reporter refuse to average cells that
+                        # are in fact comparable with isolated ones.
+                        cache_state=_cache_state(cell_count, registry[arm_name]),
                         dry_run=dry_run, keep_stack=keep_stack,
                     )
                 )
