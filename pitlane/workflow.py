@@ -11,11 +11,13 @@ import logging
 import shlex
 import subprocess
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
 from pitlane.arms import Arm
 from pitlane import config as config_mod
+from pitlane import trace as trace_mod
 from pitlane.config import Config
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,47 @@ def run(
         # would not be comparable, so fail rather than quietly go live.
         env["ODR_TRACE_MODE"] = "pinned"
         env["ODR_TRACE_ON_MISS"] = "strict"
+
+        # Pin the date to the recording's, not to the operator's env. Several
+        # prompts interpolate `get_today_str()`, so replaying on a different
+        # day changes every prompt prefix and misses on the first request --
+        # which reads as a diverged trajectory rather than as a stale variable.
+        # The trace knows its own date, so nothing has to be kept in step by
+        # hand.
+        recorded = trace_mod.recorded_date(config.trace_path)
+        if recorded:
+            existing = env.get("ODR_FROZEN_DATE", "").strip()
+            if existing and existing != recorded:
+                logger.warning(
+                    "ODR_FROZEN_DATE=%s disagrees with the trace (%s); using "
+                    "the trace's", existing, recorded,
+                )
+            env["ODR_FROZEN_DATE"] = recorded
+        else:
+            logger.warning(
+                "could not read a date from %s; prompts will use today's, "
+                "which misses unless the trace was recorded today",
+                config.trace_path,
+            )
+
+        jobs = trace_mod.recorded_jobs(config.trace_path)
+        if jobs and len(jobs) != count:
+            # Not fatal here -- `--count` may legitimately be probing -- but it
+            # is the single most likely reason a replay misses every request,
+            # and it is invisible in the workflow's own output.
+            logger.warning(
+                "trace holds %d question(s) but this cell asks for %d; the "
+                "workflow samples N questions, so a different N is a different "
+                "set and every request will miss",
+                len(jobs), count,
+            )
+    elif trace_mode == "record" and not env.get("ODR_FROZEN_DATE", "").strip():
+        # Pin the recording's own date too. Unpinned, a record run that crosses
+        # midnight writes two different prompt prefixes into one trace, and no
+        # later replay can satisfy both.
+        env["ODR_FROZEN_DATE"] = datetime.now().strftime("%Y-%m-%d")
+        logger.info("pinned ODR_FROZEN_DATE=%s for this recording",
+                    env["ODR_FROZEN_DATE"])
     env.update(extra_env or {})
     for key in arm.unset_keys("workflow"):
         env.pop(key, None)

@@ -87,7 +87,7 @@ LMCACHE_L2_DIR=/disk2/vibhav/lmcache                    # wiped per start; blank
 
 # --- knobs that change what is measured ---
 MODEL_NAME=Qwen/Qwen2.5-72B-Instruct-AWQ
-ODR_FROZEN_DATE=2026-08-04
+ODR_FROZEN_DATE=              # replay derives it from the trace; this is a fallback
 KV_FORECAST_REDIS_URL=redis://127.0.0.1:6379/0
 BENCH_GPU=0
 BENCH_MIN_FREE_RAM_GB=260        # l1-size-gb 200 + margin
@@ -241,6 +241,21 @@ up as a warning rather than as an absent column. Markers pair with the next
 request of the same `agent_id`, latest marker first, so a node that takes
 several turns gets the marker belonging to the turn rather than to an earlier
 one.
+
+The replay's date comes from the trace, not from the env. Several ODR
+prompts interpolate `get_today_str()`, so replaying on a different day changes
+every prompt prefix and the very first request misses -- which surfaces as
+`trajectory diverged`, reading like a broken trace rather than a stale
+variable. `ODR_FROZEN_DATE` is therefore set from the recording's own
+`record_started_s` on every pinned run, and an env value that disagrees is
+overridden with a warning. A `record` run pins the date too, so a recording
+that crosses midnight cannot write two prompt prefixes into one trace.
+
+The same read reports the trace's question count. A cell asking for a different
+N than the trace holds is warned about explicitly, because the workflow selects
+with `random.Random(0).sample(examples, N)` -- a different N is a different set
+of questions, not a subset, so every request misses and the symptom is
+identical to a date mismatch.
 
 Tool spans, and why they are the second thing read from the log. A tool call
 is not a request, so no row records it — the CPU and I/O between model calls is
