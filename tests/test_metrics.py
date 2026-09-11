@@ -484,9 +484,19 @@ def check_run_timeline(tmp: Path) -> None:
     assert set(firsts) == {"baseline", "ours"}, firsts
     assert len(set(firsts.values())) == 1, firsts
 
+    # The phase split rides in the task name, and a phase that does not exist
+    # is omitted rather than written as zero: a phantom has no decode phase.
+    from pitlane.timeline import Event
+    chat = Event("a", "chat", 1, 0.0, 8.0, queued_s=0.1, prefill_s=0.3, decode_s=7.5)
+    assert chat.label == "Chat #1 (q 0.10s · p 0.30s · d 7.50s)", chat.label
+    ghost = Event("a", "prefetch", 1, 0.0, 0.019, queued_s=0.002, prefill_s=0.017)
+    assert "d " not in ghost.label, ghost.label
+    assert Event("a", "chat", 2, 0.0, 1.0).label == "Chat #2"
+
     table = (run / "timelines" / "batch2__job1.md").read_text()
     assert "**baseline**" in table and "**ours**" in table
     assert "t=0 is this arm's first event" in table
+    assert "Prefill (s)" in table and "Decode (s)" in table
     print("run timeline:", names)
     print("\nall run-timeline assertions passed")
 

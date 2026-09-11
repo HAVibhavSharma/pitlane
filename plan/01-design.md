@@ -481,7 +481,13 @@ never merged -- each row is its own numbered task, so three concurrent
 or not at all, so the duration goes in the task name instead. Stretching the bar
 would make the picture legible and the data wrong. The `.md` beside it carries
 the same events as a table, with the call counts the diagram has to agree with,
-rendered from one event list so the two cannot drift apart.
+rendered from one event list so the two cannot drift apart. A chat bar carries
+its phase split in the task name — `Chat #1 (q 0.10s · p 0.30s · d 7.50s)` —
+because the bar itself only shows a total, and "ours is slower here" and "ours
+waited longer to start here" are different findings. A phase that does not
+exist is omitted rather than written as zero: a phantom runs no sampling step,
+so `d 0.00s` would report a measurement that was never taken. The `.md` carries
+the same three as columns.
 
 Two things follow from the unit being the question rather than the cell. A batch
 cell is N questions in one process, so splitting on `job_id` is what keeps them

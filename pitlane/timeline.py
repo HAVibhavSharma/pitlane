@@ -77,6 +77,12 @@ class Event:
     arm: str = ""
     job_id: str = ""
     question_id: str = ""
+    # Phase split, chat completions only. A bar says how long a call took; this
+    # says where the time went, which is the difference between "ours is slower
+    # here" and "ours waited longer to start here".
+    queued_s: float | None = None
+    prefill_s: float | None = None
+    decode_s: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -90,7 +96,25 @@ class Event:
             return (
                 f"Tool #{self.index} {self.name} ({self.duration_s * 1000:.1f} ms)"
             )
-        return f"Chat #{self.index}"
+        return f"Chat #{self.index}{self.phases}"
+
+    @property
+    def phases(self) -> str:
+        """` (q 0.10s · p 0.30s · d 7.50s)`, or empty when nothing is known.
+
+        Abbreviated because it rides in a Gantt task name, where the bar is
+        already carrying the total. Any field that is missing is omitted rather
+        than shown as zero -- a phantom has no decode phase at all, and writing
+        `d 0.00s` would make that look like a measurement.
+        """
+        parts = [
+            (label, value) for label, value in
+            (("q", self.queued_s), ("p", self.prefill_s), ("d", self.decode_s))
+            if value is not None
+        ]
+        if not parts:
+            return ""
+        return " (" + " · ".join(f"{k} {v:.2f}s" for k, v in parts) + ")"
 
 
 def _concrete(agent_id: str | None) -> bool:
@@ -137,6 +161,7 @@ def events(metrics: Metrics) -> list[Event]:
                 entry["agent_id"], "prefetch", 0, entry["arrival_ts"],
                 entry.get("finish_ts") or entry["arrival_ts"], "",
                 metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
+                entry.get("queued_s"), entry.get("prefill_s"), entry.get("decode_s"),
             ))
     for entry in metrics.per_request:
         if _concrete(entry.get("agent_id")) and entry.get("arrival_ts") is not None:
@@ -144,6 +169,7 @@ def events(metrics: Metrics) -> list[Event]:
                 entry["agent_id"], "chat", 0, entry["arrival_ts"],
                 entry.get("finish_ts") or entry["arrival_ts"], "",
                 metrics.arm, str(entry.get("job_id") or ""), metrics.question_id,
+                entry.get("queued_s"), entry.get("prefill_s"), entry.get("decode_s"),
             ))
     for entry in metrics.per_tool:
         if _concrete(entry.get("agent_id")) and entry.get("start_ts") is not None:
@@ -297,6 +323,8 @@ def run_events(run_dir: Path) -> list[Event]:
                 (row.get(name_key) or "tool") if name_key else "",
                 row.get("arm") or "", str(row.get("job_id") or ""),
                 row.get("question_id") or "",
+                _float(row.get("queued_s")), _float(row.get("prefill_s")),
+                _float(row.get("decode_s")),
             ))
     return _number(raw)
 
@@ -374,8 +402,9 @@ def combined_table(events_: list[Event], *, title: str) -> str:
         )
     lines += [
         "",
-        "| Arm | Agent ID | Type | Call # | Start (+s) | End (+s) | Duration |",
-        "|---|---|---|---:|---:|---:|---:|",
+        "| Arm | Agent ID | Type | Call # | Start (+s) | End (+s) | Duration | "
+        "Queued (s) | Prefill (s) | Decode (s) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for event in shifted:
         duration = (
@@ -383,9 +412,14 @@ def combined_table(events_: list[Event], *, title: str) -> str:
             else f"{event.duration_s * 1000:.1f} ms"
         )
         kind = f"{event.kind} {event.name}".strip()
+        phase = [
+            "—" if value is None else f"{value:.3f}"
+            for value in (event.queued_s, event.prefill_s, event.decode_s)
+        ]
         lines.append(
             f"| {event.arm} | {_short(event.agent_id)} | {kind} | {event.index} | "
-            f"{event.start - base:.3f} | {event.end - base:.3f} | {duration} |"
+            f"{event.start - base:.3f} | {event.end - base:.3f} | {duration} | "
+            + " | ".join(phase) + " |"
         )
     return "\n".join(lines) + "\n"
 
