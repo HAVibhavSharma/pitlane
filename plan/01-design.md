@@ -149,7 +149,7 @@ for question q in Q:            # isolated-prompt mode
 **setup(arm)**
 1. Kill leftover sessions.
 2. `baseline` / `ours`: **stop LMCache → wipe `$LMCACHE_L2_DIR` → start LMCache → wait for port** (one step; never wipe under a live server). With `LMCACHE_L2_DIR` blank there is no disk tier and the stop/start is the whole wipe. `continuum`: skip.
-2b. **HBM is flushed after every question, not only before the first** (`--hbm-flush-between-queries`). A batch cell is N questions in one process, so without it every question after the first starts on the HBM the one before it left resident — measuring a cache it did not build. `continuum` and `record` pass `--no-kv-metrics-reset`, and the flush is a parameter of that endpoint, so they cannot do this: their batch cells stay `cache_state: warm` and the reporter keeps them apart from the flushed ones rather than averaging across.
+2b. **HBM is flushed after every question, not only before the first** (`--hbm-flush-between-queries`). A batch cell is N questions in one process, so without it every question after the first starts on the HBM the one before it left resident — measuring a cache it did not build. All three measurement arms do this. `record` keeps `--no-kv-metrics-reset` — it is not a measurement, and the flush is a parameter of that endpoint — so its batch cells stay `cache_state: warm` and the reporter keeps them apart from the flushed ones rather than averaging across.
 3. Start the arm's vLLM in its own tmux session, log to the arm's log file.
 4. Poll `/v1/models` until ready (or fail on log error pattern / timeout).
 5. `POST /v1/kv_metrics/reset`; note stats-file offset and wall-clock `t0`.

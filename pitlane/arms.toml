@@ -43,7 +43,13 @@ server_args = [
   "--enable-prompt-tokens-details",
 ]
 workflow_script = "tests/run_evaluate.py"
-workflow_args = ["--ablation-mode", "baseline", "--no-kv-metrics-reset"]
+# `--no-kv-metrics-reset` was here from the first commit, annotated only as an
+# "older build". That build has `POST /v1/kv_metrics/reset` and it honours
+# `flush_hbm`, so the switch was costing this arm both the epoch boundary and
+# any per-question isolation, for no reason anyone had written down. If it
+# turns out the route really does fail here, `reset_kv_metrics` never raises
+# and `kv_metrics_reset_ok` in the results says so.
+workflow_args = ["--hbm-flush-between-queries", "--ablation-mode", "baseline"]
 workflow_env = { LANGGRAPH_VLLM_ECHO_BASE_URL = "http://localhost:8000", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
 
 [ours]
