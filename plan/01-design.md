@@ -248,14 +248,22 @@ request of the same `agent_id`, latest marker first, so a node that takes
 several turns gets the marker belonging to the turn rather than to an earlier
 one.
 
-The replay's date comes from the trace, not from the env. Several ODR
-prompts interpolate `get_today_str()`, so replaying on a different day changes
-every prompt prefix and the very first request misses -- which surfaces as
-`trajectory diverged`, reading like a broken trace rather than a stale
-variable. `ODR_FROZEN_DATE` is therefore set from the recording's own
-`record_started_s` on every pinned run, and an env value that disagrees is
-overridden with a warning. A `record` run pins the date too, so a recording
-that crosses midnight cannot write two prompt prefixes into one trace.
+The replay's date, and where it comes from. Several ODR prompts interpolate
+`get_today_str()`, so replaying on a different date changes every prompt prefix
+and the very first request misses -- which surfaces as `trajectory diverged`,
+reading like a broken trace rather than a wrong date.
+
+An explicit `ODR_FROZEN_DATE` wins; the trace only fills the gap when it is
+unset. And what the trace supplies is the date **in its prompts**, not the date
+it ran: a recording made under its own `ODR_FROZEN_DATE` carries that date in
+every prompt while its wall stamps say something else entirely. Measured on a
+real trace -- recorded Sep 8, prompts reading `Tue Aug 4, 2026`. So
+`prompt_date` matches `get_today_str()`'s rendering out of the first recorded
+request body, and `record_started_s` is the fallback for a recording that was
+never frozen. A disagreement between the explicit value and the trace is
+warned about without being overridden, because it predicts a miss on the first
+request. A `record` run pins its own date, so a recording that crosses midnight
+cannot write two prompt prefixes into one trace.
 
 The same read reports the trace's question count. A cell asking for a different
 N than the trace holds is warned about explicitly, because the workflow selects

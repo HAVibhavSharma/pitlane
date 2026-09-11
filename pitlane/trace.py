@@ -12,8 +12,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
+
+# What `get_today_str()` renders into every prompt that interpolates a date:
+# `f"{now:%a} {now:%b} {now.day}, {now:%Y}"`, e.g. `Tue Aug 4, 2026`. Note the
+# un-padded day, which is why this is matched rather than parsed with a fixed
+# width.
+_PROMPT_DATE = re.compile(
+    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}\b"
+)
 
 logger = logging.getLogger("pitlane.trace")
 
@@ -30,19 +40,37 @@ def _first_entry(path: Path) -> dict | None:
     return None
 
 
-def recorded_date(path: Path) -> str | None:
-    """`YYYY-MM-DD` of the recording, from its first request's wall stamp.
+def prompt_date(path: Path) -> str | None:
+    """`YYYY-MM-DD` as it appears *inside* the recording's prompts.
 
-    Several ODR prompts interpolate `get_today_str()`, so an unpinned clock
-    changes every prompt prefix from one day to the next and the replay's
-    request hashes stop matching. `ODR_FROZEN_DATE` exists to pin it, but
-    setting it by hand means keeping a date in an env file in step with a file
-    on disk -- and the failure when they drift is a trace miss on the very
-    first call, which reads like a broken trace rather than a stale variable.
+    The authoritative answer, and not the same as when the recording ran. A
+    recording made under its own `ODR_FROZEN_DATE` carries that date in its
+    prompts while its wall stamps say something else entirely -- measured on a
+    real trace: recorded Sep 8, prompts reading `Tue Aug 4, 2026`. Replaying
+    against the wall stamp would then miss every request, so the prompt text is
+    what has to be matched.
+    """
+    entry = _first_entry(path)
+    if entry is None:
+        return None
+    try:
+        body = json.dumps(entry.get("request_body") or "")
+    except (TypeError, ValueError):
+        return None
+    found = _PROMPT_DATE.search(body)
+    if not found:
+        return None
+    try:
+        return datetime.strptime(found.group(0), "%a %b %d, %Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
-    The trace already knows. `record_started_s` is the wall clock the first
-    recorded request went out on, in the same local timezone `datetime.now()`
-    reads, so the date derived here is the date the recording's prompts carry.
+
+def started_date(path: Path) -> str | None:
+    """`YYYY-MM-DD` the recording *ran* on, from its first wall stamp.
+
+    A fallback, and only correct for a recording that was not itself frozen --
+    see `prompt_date`, which is what the prompts actually say.
     """
     entry = _first_entry(path)
     if entry is None:
@@ -54,6 +82,23 @@ def recorded_date(path: Path) -> str | None:
         return datetime.fromtimestamp(float(started)).strftime("%Y-%m-%d")
     except (TypeError, ValueError, OSError):
         return None
+
+
+def recorded_date(path: Path) -> tuple[str | None, str]:
+    """`(date, source)` for the replay to pin to.
+
+    Several ODR prompts interpolate `get_today_str()`, so replaying on a
+    different date changes every prompt prefix and the first request misses.
+    The prompts themselves are the truth; the wall stamp is a guess that is
+    right only when the recording ran unfrozen.
+    """
+    date = prompt_date(path)
+    if date:
+        return date, "prompt"
+    date = started_date(path)
+    if date:
+        return date, "record_started_s"
+    return None, "none"
 
 
 def recorded_jobs(path: Path) -> list[str]:

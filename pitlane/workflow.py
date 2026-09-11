@@ -106,26 +106,34 @@ def run(
         env["ODR_TRACE_MODE"] = "pinned"
         env["ODR_TRACE_ON_MISS"] = "strict"
 
-        # Pin the date to the recording's, not to the operator's env. Several
-        # prompts interpolate `get_today_str()`, so replaying on a different
-        # day changes every prompt prefix and misses on the first request --
-        # which reads as a diverged trajectory rather than as a stale variable.
-        # The trace knows its own date, so nothing has to be kept in step by
-        # hand.
-        recorded = trace_mod.recorded_date(config.trace_path)
-        if recorded:
-            existing = env.get("ODR_FROZEN_DATE", "").strip()
-            if existing and existing != recorded:
+        # The date has to match the recording's prompts, which interpolate
+        # `get_today_str()` -- replay on another date and every prompt prefix
+        # differs, so the first request misses and `strict` ends the run.
+        #
+        # An explicit `ODR_FROZEN_DATE` wins. It is the operator saying which
+        # date the recording was made under, and they can be right when the
+        # trace cannot answer: a recording frozen to a date carries that date
+        # in its prompts while its wall stamps say when it actually ran.
+        recorded, source = trace_mod.recorded_date(config.trace_path)
+        explicit = env.get("ODR_FROZEN_DATE", "").strip()
+        if explicit:
+            if recorded and recorded != explicit:
+                # Worth saying either way round: if the trace's prompts really
+                # do read `recorded`, this run will miss on the first request.
                 logger.warning(
-                    "ODR_FROZEN_DATE=%s disagrees with the trace (%s); using "
-                    "the trace's", existing, recorded,
+                    "ODR_FROZEN_DATE=%s but the trace's %s says %s; using the "
+                    "explicit value", explicit, source, recorded,
                 )
+            env["ODR_FROZEN_DATE"] = explicit
+            logger.info("frozen date %s (explicit)", explicit)
+        elif recorded:
             env["ODR_FROZEN_DATE"] = recorded
+            logger.info("frozen date %s (from the trace's %s)", recorded, source)
         else:
             logger.warning(
-                "could not read a date from %s; prompts will use today's, "
-                "which misses unless the trace was recorded today",
-                config.trace_path,
+                "no ODR_FROZEN_DATE and none readable from %s; prompts will "
+                "use today's date, which misses unless the recording was made "
+                "today and unfrozen", config.trace_path,
             )
 
         jobs = trace_mod.recorded_jobs(config.trace_path)
