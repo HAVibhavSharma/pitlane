@@ -73,10 +73,10 @@ def summary(results_csv: Path) -> str:
             header += f" — {next(iter(output_tokens))} output tokens"
         lines += [header, ""]
         lines += [
-            "| Arm | rep | cache | TTFT (s) | KV hit rate | Query tokens | Token hits | "
-            "Prefetches | Useful | Useful % | Late % | Lead (mean s) | "
+            "| Arm | rep | cache | Chats | TTFT (s) | KV hit rate | Query tokens | "
+            "Token hits | Prefetches | Useful | Useful % | Late % | Lead (mean s) | "
             "Oracle window (s) | Waiting (max) | Notes |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "|---|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in sorted(subset, key=lambda r: (r["arm"], int(r["rep"] or 1))):
             notes = []
@@ -86,6 +86,10 @@ def summary(results_csv: Path) -> str:
                 notes.append("off-pin")
             lines.append(
                 f"| {row['arm']} | {row['rep']} | {row['cache_state']} | "
+                # Chat completions served. Equal across arms is the pin holding:
+                # pinned replay sends the same calls, so a difference means the
+                # trajectory diverged and nothing beside it is comparable.
+                f"{_fmt(row['requests'])} | "
                 f"{_fmt(row['ttft_s'], '.2f')} | "
                 f"{_fmt(row['kv_hit_rate'], '.2%')} | "
                 f"{_fmt(row['query_tokens'])} | {_fmt(row['token_hits'])} | "
