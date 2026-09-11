@@ -134,7 +134,8 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     stats_dir = cell / "stats"
     stats_dir.mkdir(parents=True, exist_ok=True)
 
-    env = arm.resolved_env("server", repo=repo, cell=cell)
+    env = arm.resolved_env("server", repo=repo, cell=cell,
+                           model=config.model_name)
     env["VLLM_REQUEST_STATS_DIR"] = str(stats_dir)
     # Each build lives in its own virtualenv; `vllm` on PATH is whichever one
     # the shell activated, which for a multi-arm run is the wrong one twice out
@@ -143,7 +144,9 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     env = {k: v for k, v in env.items() if v != ""}
 
     args = " ".join(
-        shlex.quote(a) for a in arm.resolved_server_args(repo=repo, cell=cell)
+        shlex.quote(a)
+        for a in arm.resolved_server_args(repo=repo, cell=cell,
+                                        model=config.model_name)
     )
     command = (
         f"{shlex.quote(config_mod.venv_bin(venv, 'vllm'))} "

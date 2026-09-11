@@ -121,9 +121,15 @@ since falling back to `PATH` is a fallback and never the intent.
 Everything else from the manual runbook (`MODEL_PROVIDER`, the four
 `*_MODEL_MAX_TOKENS`, `LANGGRAPH_PROMPT_PSEUDO_DYNAMIC`, the
 `LANGGRAPH_VLLM_AGENT_*` block, `VLLM_NODE_EVICTION_*`, `ODR_TRACE_*`) is
-**derived per arm** in `arms.yaml` — not user-edited per run, so an arm can
+**derived per arm** in `arms.toml` — not user-edited per run, so an arm can
 never accidentally inherit another arm's flags. `LANGGRAPH_VLLM_AGENT_*` is
-explicitly `unset` in every arm but `ours`.
+explicitly `unset` in every arm but `ours`, where `LANGGRAPH_VLLM_AGENT_MODEL`
+is `{model}` — the served model, substituted rather than written out a second
+time. `BackgroundVLLMAgentWorker.enabled` is `base_url and model and enabled`
+and is a property with no error path, so a missing model does not fail: the
+worker reports itself disabled, langgraph issues no prefetches and emits no
+`min_lead` markers, and nothing says why. `workflow.run` warns when the agent
+is enabled with no model resolvable.
 
 ---
 

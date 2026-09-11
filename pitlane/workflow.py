@@ -93,7 +93,8 @@ def run(
     cell.mkdir(parents=True, exist_ok=True)
 
     env = dict(config.env)
-    env.update(arm.resolved_env("workflow", repo=repo, cell=cell))
+    env.update(arm.resolved_env("workflow", repo=repo, cell=cell,
+                                model=config.model_name))
     env.update({
         "ODR_TRACE_MODE": trace_mode,
         "ODR_TRACE_PATH": str(config.trace_path),
@@ -158,6 +159,20 @@ def run(
     for key in arm.unset_keys("workflow"):
         env.pop(key, None)
     env = {k: v for k, v in env.items() if v != ""}
+
+    if env.get("LANGGRAPH_VLLM_AGENT_ENABLE", "").strip() not in ("", "0", "false"):
+        # `BackgroundVLLMAgentWorker.enabled` is `base_url and model and
+        # enabled`, and it is a property with no error path: without a model the
+        # worker reports itself disabled and the predictor stops silently. No
+        # prefetches from langgraph, no `min_lead` markers, and nothing in the
+        # log to say why -- which is exactly how this went unnoticed.
+        if not (env.get("LANGGRAPH_VLLM_AGENT_MODEL", "").strip()
+                or env.get("OPENAI_MODEL", "").strip()):
+            logger.warning(
+                "LANGGRAPH_VLLM_AGENT_ENABLE is set but no agent model is; "
+                "langgraph's predictor will report itself disabled and issue "
+                "nothing",
+            )
 
     command = [
         config_mod.venv_bin(config.paths.workflow_venv, "python"), arm.workflow_script,

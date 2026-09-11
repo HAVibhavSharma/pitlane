@@ -35,27 +35,35 @@ class Arm:
     # by accident.
     venv: str = ""
 
-    def resolved_env(self, which: str, *, repo: Path, cell: Path) -> dict[str, str]:
+    def resolved_env(self, which: str, *, repo: Path, cell: Path,
+                     model: str = "") -> dict[str, str]:
         source = self.server_env if which == "server" else self.workflow_env
         return {
-            key: self.expand(value, repo=repo, cell=cell)
+            key: self.expand(value, repo=repo, cell=cell, model=model)
             for key, value in source.items()
         }
 
     @staticmethod
-    def expand(value: str, *, repo: Path, cell: Path) -> str:
+    def expand(value: str, *, repo: Path, cell: Path, model: str = "") -> str:
         """Substitute the run-dependent placeholders.
 
         Literal replacement, not str.format: server args carry JSON
         (``{"kv_connector": ...}``) whose braces format() would try to read as
         fields.
+
+        ``{model}`` exists so an arm can name the served model without the name
+        being written twice. Two copies drift, and the way this one drifts is
+        silent: langgraph's agent worker reports itself disabled when it cannot
+        resolve a model, so the predictor stops without an error.
         """
         for token, path in (("{repo}", repo), ("{cell}", cell), ("{plan}", _PLAN)):
             value = value.replace(token, str(path))
-        return value
+        return value.replace("{model}", model)
 
-    def resolved_server_args(self, *, repo: Path, cell: Path) -> list[str]:
-        return [self.expand(a, repo=repo, cell=cell) for a in self.server_args]
+    def resolved_server_args(self, *, repo: Path, cell: Path,
+                             model: str = "") -> list[str]:
+        return [self.expand(a, repo=repo, cell=cell, model=model)
+                for a in self.server_args]
 
     def unset_keys(self, which: str) -> list[str]:
         """Keys the arm explicitly blanks, so they cannot leak in from a shell."""
