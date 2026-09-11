@@ -209,6 +209,9 @@ arrival window.
 | **Useful prefetches** | Count of phantoms that put tokens in HBM which were not already there *and* whose tokens a real request then hit: `credited = min(consumer.num_local_cached_tokens, phantom.num_prompt_tokens) - phantom.num_local_cached_tokens`, floored to whole blocks, `credited > 0`. A phantom whose own prefix was already fully HBM-resident promoted nothing and is never useful, however large its consumer's hit. Absolute count, for the same reason **Total prefetches** is one. → `useful_prefetches` | request JSONL (this cell only) |
 | **Useful prefetch %** | `useful_prefetches / total_prefetches`. A phantom that had no consumer, or had not finished when its consumer arrived, cannot be useful; the remainder is the phantom that landed in time, added nothing, and was hit anyway. → `useful_prefetch_pct` | derived |
 | **Chat completions** | `requests` — how many real (non-phantom) calls the question made. Equal across arms is the pin holding: pinned replay sends the same calls, so a difference means the trajectory diverged and nothing beside it is comparable. → `requests` | request JSONL |
+| **Distinct prefetch agents** | How many distinct `agent_id`s were warmed at all. Per *place in the graph*, not per call: a React node is warmed on every turn it takes, so warming it ten times counts once. → `distinct_prefetch_agents` | request JSONL |
+| **Distinct useful agents** | How many of those had at least one prefetch that helped. → `distinct_useful_agents` | request JSONL |
+| **Distinct useful %** | `distinct_useful_agents / distinct_prefetch_agents` — what share of the places being warmed are worth warming, as opposed to what share of warms paid off. A node warmed on every turn and helped on one scores the same as a node helped on all of them; **Useful prefetch %** is the metric that separates those. → `distinct_useful_pct` | derived |
 | **Workflow output tokens** | `Σ num_generation_tokens` over the question's real requests — everything the workflow generated, the per-question total shown in the results header. Pinned replay decodes the recorded count exactly, so this must equal the recorded trace's total; a mismatch means the pin did not hold. | request JSONL (checked against the trace) |
 | **Scheduler occupancy** | Over the question's window, from the scheduler timeline: mean and max `num_running_reqs` / `num_waiting_reqs`, total `num_scheduled_reqs` and `num_new_scheduled_reqs` (admissions), plus preemptions. Says whether an arm's latency came from queueing rather than from cache behaviour. | `scheduler_engine0_*.jsonl` |
 
@@ -455,6 +458,7 @@ Layout:
 ```
 $BENCH_ROOT/<run_id>/
   state.json  results.csv  requests.csv  summary.md  resources.csv  env.redacted
+  by_question.csv                             one row per (arm, question, rep, job)
   prefetches.csv                              one row per phantom
   tools.csv                                   one row per leaf tool call
   timelines/<question_id>__job<n>.mmd          every arm on one axis
@@ -532,6 +536,12 @@ everything that is not queue wait is the LMCache load or the prefill
 `prefill_on_miss` let through. Its `decode_s` stays blank, which is the honest
 value — not "zero decode" but "no decode phase", since `max_tokens=1` and the
 prefetch-only finalize path mean no sampling step ever runs.
+
+`by_question.csv` exists because `results.csv` is one row per *cell*, and a
+batch cell is N questions in one process -- so its numbers are sums over
+questions that were never meant to be added together. The per-request rows
+already carry `job_id`, so this is a regroup of data that exists rather than a
+second collection pass, and the question is the unit everything is compared at.
 
 `results.csv` is one row per cell, `requests.csv` one row per chat completion
 and `prefetches.csv` one row per phantom (all three prefixed with `arm` /

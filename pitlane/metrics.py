@@ -198,6 +198,13 @@ class Metrics:
     late_prefetches: int = 0
     unused_prefetches: int = 0
     useful_prefetches: int = 0
+    # Per *agent*, not per call. A React node is warmed on every turn it takes,
+    # so a node that is reliably helped by prefetching counts once here instead
+    # of once per turn -- which is the difference between "how many warms paid
+    # off" and "how many of the places we warm are worth warming".
+    distinct_prefetch_agents: int = 0
+    distinct_useful_agents: int = 0
+    distinct_useful_pct: float | None = None
     late_prefetch_pct: float | None = None
     useful_prefetch_pct: float | None = None
     prefetch_lead_mean_s: float | None = None
@@ -480,6 +487,18 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
     metrics.late_prefetches = sum(e["late_prefetches"] for e in metrics.per_request)
     metrics.useful_prefetches = sum(1 for e in metrics.per_request if e["useful"])
     metrics.useful_prefetch_pct = metrics.useful_prefetches / metrics.total_prefetches
+
+    warmed = {
+        ghost.get("agent_id") for ghost in phantom if ghost.get("agent_id")
+    }
+    helped = {
+        entry["agent_id"] for entry in metrics.per_request
+        if entry["useful"] and entry.get("agent_id")
+    }
+    metrics.distinct_prefetch_agents = len(warmed)
+    metrics.distinct_useful_agents = len(helped)
+    if warmed:
+        metrics.distinct_useful_pct = len(helped) / len(warmed)
 
     if leads:
         metrics.prefetch_lead_mean_s = statistics.fmean(leads)

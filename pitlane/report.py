@@ -23,6 +23,7 @@ _COLUMNS = [
     "external_token_hits", "workflow_output_tokens",
     "total_prefetches", "late_prefetches", "late_prefetch_pct", "unused_prefetches",
     "useful_prefetches", "useful_prefetch_pct",
+    "distinct_prefetch_agents", "distinct_useful_agents", "distinct_useful_pct",
     "prefetch_lead_mean_s", "prefetch_lead_min_s",
     "prefetch_lead_min_threshold_s", "lead_window_mean_s", "lead_markers",
     "tool_seconds", "unmatched_tool_markers",
@@ -182,3 +183,118 @@ def write_metrics(cell: Path, metrics: Metrics) -> Path:
     path = cell / "metrics.json"
     path.write_text(json.dumps(metrics.to_dict(), indent=2) + "\n")
     return path
+
+
+# -- per question -----------------------------------------------------------
+#
+# `results.csv` is one row per *cell*, and a batch cell is N questions in one
+# process -- so its numbers are sums over questions that were never meant to be
+# added together. The question is the unit everything is actually compared at,
+# and the per-request rows already carry `job_id`, so this is a regroup of data
+# that exists rather than a second collection pass.
+
+_BY_QUESTION_COLUMNS = [
+    "arm", "question_id", "rep", "job_id",
+    "requests", "query_tokens", "token_hits", "external_token_hits",
+    "kv_hit_rate", "output_tokens", "wall_s",
+    "queued_s", "prefill_s", "decode_s",
+    "prefetches", "useful_prefetches", "useful_prefetch_pct",
+    "distinct_prefetch_agents", "distinct_useful_agents", "distinct_useful_pct",
+    "late_prefetches",
+]
+
+
+def _num(value: str | None) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def by_question(run_dir: Path) -> list[dict[str, Any]]:
+    """One row per `(arm, question_id, rep, job_id)`, from the request rows."""
+    requests = _read_csv(run_dir / "requests.csv")
+    prefetches = _read_csv(run_dir / "prefetches.csv")
+    if not requests:
+        return []
+
+    groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
+    for row in requests:
+        key = (row.get("arm", ""), row.get("question_id", ""),
+               row.get("rep", ""), row.get("job_id", ""))
+        groups.setdefault(key, []).append(row)
+
+    warmed: dict[tuple[str, str, str, str], set[str]] = {}
+    for row in prefetches:
+        key = (row.get("arm", ""), row.get("question_id", ""),
+               row.get("rep", ""), row.get("job_id", ""))
+        if row.get("agent_id"):
+            warmed.setdefault(key, set()).add(row["agent_id"])
+
+    out: list[dict[str, Any]] = []
+    for key, rows in sorted(groups.items()):
+        arm, question, rep, job = key
+        query = sum(_num(r.get("query_tokens")) for r in rows)
+        hits = sum(_num(r.get("token_hits")) for r in rows)
+        starts = [_num(r.get("arrival_ts")) for r in rows if r.get("arrival_ts")]
+        ends = [_num(r.get("finish_ts")) for r in rows if r.get("finish_ts")]
+        # Distinct *agents* helped, so a React node warmed on every turn counts
+        # once. The denominator is the agents warmed at all, from the phantom
+        # rows -- an agent can be warmed and never helped, and that is the case
+        # the ratio exists to expose.
+        helped = {r["agent_id"] for r in rows
+                  if _truthy(r.get("useful")) and r.get("agent_id")}
+        warm_set = warmed.get(key, set())
+        useful = sum(1 for r in rows if _truthy(r.get("useful")))
+        prefetch_n = sum(1 for r in prefetches
+                         if (r.get("arm"), r.get("question_id"), r.get("rep"),
+                             r.get("job_id")) == key)
+        out.append({
+            "arm": arm, "question_id": question, "rep": rep, "job_id": job,
+            "requests": len(rows),
+            "query_tokens": int(query),
+            "token_hits": int(hits),
+            "external_token_hits": int(
+                sum(_num(r.get("external_token_hits")) for r in rows)
+            ),
+            "kv_hit_rate": round(hits / query, 6) if query else None,
+            "output_tokens": int(sum(_num(r.get("output_tokens")) for r in rows)),
+            "wall_s": round(max(ends) - min(starts), 3) if starts and ends else None,
+            "queued_s": round(sum(_num(r.get("queued_s")) for r in rows), 3),
+            "prefill_s": round(sum(_num(r.get("prefill_s")) for r in rows), 3),
+            "decode_s": round(sum(_num(r.get("decode_s")) for r in rows), 3),
+            "prefetches": prefetch_n,
+            "useful_prefetches": useful,
+            "useful_prefetch_pct": round(useful / prefetch_n, 6) if prefetch_n else None,
+            "distinct_prefetch_agents": len(warm_set),
+            "distinct_useful_agents": len(helped),
+            "distinct_useful_pct": (
+                round(len(helped) / len(warm_set), 6) if warm_set else None
+            ),
+            "late_prefetches": sum(int(_num(r.get("late_prefetches"))) for r in rows),
+        })
+    return out
+
+
+def write_by_question(run_dir: Path) -> Path | None:
+    rows = by_question(run_dir)
+    if not rows:
+        return None
+    path = run_dir / "by_question.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_BY_QUESTION_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k) for k in _BY_QUESTION_COLUMNS})
+    return path
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="") as handle:
+        return list(csv.DictReader(handle))

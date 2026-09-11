@@ -285,6 +285,16 @@ def check_useful(tmp: Path) -> None:
     # p1 (seed) and one of p3a/p3b. p2 promoted a prefix HBM already held.
     assert m.useful_prefetches == 2, m.useful_prefetches
     assert m.useful_prefetch_pct == 0.5, m.useful_prefetch_pct
+    # Distinct counts are per agent, not per call: `react` is warmed twice and
+    # counts once, and `warm` was warmed but never helped, which is the case
+    # the ratio exists to expose.
+    assert m.distinct_prefetch_agents == 3, m.distinct_prefetch_agents
+    assert m.distinct_useful_agents == 2, m.distinct_useful_agents
+    assert abs(m.distinct_useful_pct - 2 / 3) < 1e-9, m.distinct_useful_pct
+    # Per-call and per-agent answer different questions and must not be equal
+    # here, or the fixture is not exercising the difference.
+    assert m.useful_prefetches == 2 and m.total_prefetches == 4
+
     # p3a and p3b share one consumer, so the fan-out is credited once.
     # Per-request attribution: the seed is charged to r1, the already-warm
     # promotion to r2, and both react warms to r3 with only the better credited.

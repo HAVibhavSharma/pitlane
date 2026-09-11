@@ -102,7 +102,8 @@ def run_cell(
     report.append_request_rows(config.run_dir / "requests.csv", collected)
     report.append_prefetch_rows(config.run_dir / "prefetches.csv", collected)
     report.append_tool_rows(config.run_dir / "tools.csv", collected)
-    # After the CSVs, since the combined charts are read back out of them.
+    # After the CSVs, since both are read back out of them.
+    report.write_by_question(config.run_dir)
     timeline.write_run(config.run_dir)
     report.write_summary(config.run_dir)
 
