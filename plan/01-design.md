@@ -291,6 +291,14 @@ process's. Posting is fire-and-forget on the marker executor, so the
 instrumentation stays off the path it is measuring. `ODR_TOOL_MARKERS=0` turns
 it off.
 
+Every arm posts them, including the ones that never prefetch. `echo_base_url()`
+derives from the agents url by default, which is right for the lead markers --
+they only mean anything on an arm that prefetches -- and wrong for these: tool
+work is workflow-side and every arm does it identically, so deriving would make
+the one measurement whose entire value is comparative available on exactly one
+side of the comparison. `LANGGRAPH_VLLM_ECHO_BASE_URL` is set for all four arms
+and takes precedence.
+
 Pairing is on `call_id` and nothing weaker. Three tools run concurrently under
 one `asyncio.gather`, so their markers interleave and matching by agent id or by
 order would cross the spans. `tool_end` is emitted from a `finally`, so a tool

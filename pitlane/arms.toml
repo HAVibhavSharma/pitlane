@@ -21,7 +21,7 @@ server_args = [
 ]
 workflow_script = "tests/run_evaluate.py"
 workflow_args = ["--ablation-mode", "full"]
-workflow_env = { LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
+workflow_env = { LANGGRAPH_VLLM_ECHO_BASE_URL = "http://localhost:8000", LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
 
 [continuum]
 # Older build: it has no built-in timestamped access log, only
@@ -44,7 +44,7 @@ server_args = [
 ]
 workflow_script = "tests/run_evaluate.py"
 workflow_args = ["--ablation-mode", "baseline", "--no-kv-metrics-reset"]
-workflow_env = { LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
+workflow_env = { LANGGRAPH_VLLM_ECHO_BASE_URL = "http://localhost:8000", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
 
 [ours]
 description = "vLLM + agent prefetch + node eviction"
@@ -64,7 +64,7 @@ server_args = [
 ]
 workflow_script = "tests/run_evaluate_node_eviction.py"
 workflow_args = []
-workflow_env = { LANGGRAPH_VLLM_AGENT_ENABLE = "1", LANGGRAPH_VLLM_AGENT_MODEL = "{model}", LANGGRAPH_VLLM_AGENT_BASE_URL = "http://localhost:8000/v1/agents", LANGGRAPH_VLLM_AGENT_NAMESPACE = "langgraph", LANGGRAPH_VLLM_AGENT_WARMUP = "0", LANGGRAPH_VLLM_AGENT_TIMEOUT_SECONDS = "30", LANGGRAPH_VLLM_AGENT_LOG_PATH = "{cell}/agent_prefetch.jsonl", KV_PREDICTION_HORIZON = "5", KV_EVICTION_DISABLE_PREFETCH = "0" }
+workflow_env = { LANGGRAPH_VLLM_ECHO_BASE_URL = "http://localhost:8000", LANGGRAPH_VLLM_AGENT_ENABLE = "1", LANGGRAPH_VLLM_AGENT_MODEL = "{model}", LANGGRAPH_VLLM_AGENT_BASE_URL = "http://localhost:8000/v1/agents", LANGGRAPH_VLLM_AGENT_NAMESPACE = "langgraph", LANGGRAPH_VLLM_AGENT_WARMUP = "0", LANGGRAPH_VLLM_AGENT_TIMEOUT_SECONDS = "30", LANGGRAPH_VLLM_AGENT_LOG_PATH = "{cell}/agent_prefetch.jsonl", KV_PREDICTION_HORIZON = "5", KV_EVICTION_DISABLE_PREFETCH = "0" }
 
 # The recording arm: same stack as baseline, different trace mode. Kept
 # separate so a record run can never be mistaken for a measurement.
@@ -85,4 +85,4 @@ server_args = [
 ]
 workflow_script = "tests/run_evaluate.py"
 workflow_args = ["--ablation-mode", "baseline", "--skip-cold-phase", "--no-kv-metrics-reset"]
-workflow_env = { LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
+workflow_env = { LANGGRAPH_VLLM_ECHO_BASE_URL = "http://localhost:8000", LANGGRAPH_ABLATION_MODE = "full", LANGGRAPH_VLLM_AGENT_ENABLE = "", LANGGRAPH_VLLM_AGENT_BASE_URL = "" }
