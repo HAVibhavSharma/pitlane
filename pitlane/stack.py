@@ -64,7 +64,7 @@ def lmcache_venv(config: Config, arm: Arm | None = None) -> Path | None:
 
 
 def restart_lmcache(config: Config, arm: Arm | None = None, *,
-                    l1_size_gb: int = 200) -> None:
+                    l1_size_gb: float | None = None) -> None:
     """Stop, wipe, start -- in that order, always together.
 
     The L1 index is in memory and the L2 store is on disk. Wiping the disk
@@ -82,6 +82,7 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
     tmux.kill(LMCACHE_SESSION)
     _free_port(config.lmcache_port)
 
+    l1_size_gb = config.lmcache_l1_gb if l1_size_gb is None else l1_size_gb
     venv = lmcache_venv(config, arm)
     target = config.paths.lmcache_l2_dir
     adapter_arg = ""
@@ -98,7 +99,7 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
     command = (
         f"LMCACHE_LOG_KV_HASH=1 {shlex.quote(config_mod.venv_bin(venv, 'lmcache'))}"
         " server"
-        f" --l1-size-gb {l1_size_gb}"
+        f" --l1-size-gb {l1_size_gb:g}"
         " --eviction-policy LRU"
         " --chunk-size 16"
         " --host 0.0.0.0"

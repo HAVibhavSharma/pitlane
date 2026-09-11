@@ -131,6 +131,11 @@ class Config:
     trace_path: Path
     gpu: int = 0
     min_free_ram_gb: float = 260.0
+    # LMCache's L1 pool: CPU memory, grown lazily from a 20 GB initial pool up
+    # to this ceiling, where LRU starts discarding. It is the largest single
+    # thing a run allocates on the host, so it and `min_free_ram_gb` are one
+    # decision -- see `Config.load`.
+    lmcache_l1_gb: float = 200.0
     server_ready_timeout_s: float = 1800.0
     port: int = 8000
     lmcache_port: int = 10903
@@ -200,13 +205,24 @@ class Config:
                 Path(value) if (value := env.get("LMCACHE_VENV", "").strip()) else None
             ),
         )
+        # L1 and the RAM preflight are one decision, not two. The floor exists
+        # *because* of the pool, so deriving it keeps a lowered L1 from leaving
+        # behind a 260 GB requirement that has nothing to do with the run --
+        # and a raised one from passing a check it should not. An explicit
+        # BENCH_MIN_FREE_RAM_GB still wins, for a box with other tenants.
+        l1_gb = float(_or(env, "BENCH_LMCACHE_L1_GB", "200"))
+        ram_margin_gb = float(_or(env, "BENCH_RAM_MARGIN_GB", "60"))
+
         return cls(
             env=env,
             paths=paths,
             model_name=need("MODEL_NAME"),
             trace_path=Path(need("ODR_TRACE_PATH")),
             gpu=int(env.get("BENCH_GPU", "0")),
-            min_free_ram_gb=float(env.get("BENCH_MIN_FREE_RAM_GB", "260")),
+            lmcache_l1_gb=l1_gb,
+            min_free_ram_gb=float(
+                _or(env, "BENCH_MIN_FREE_RAM_GB", str(l1_gb + ram_margin_gb))
+            ),
             server_ready_timeout_s=float(env.get("BENCH_SERVER_READY_TIMEOUT_S", "1800")),
             redis_url=env.get("KV_FORECAST_REDIS_URL", "redis://127.0.0.1:6379/0"),
             prefetch_lead_min_s=float(env.get("BENCH_PREFETCH_LEAD_MIN_S", "0.1")),
