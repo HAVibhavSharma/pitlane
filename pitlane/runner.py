@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pitlane import metrics as metrics_mod
-from pitlane import report, stack, timeline, workflow
+from pitlane import report, resources, stack, timeline, workflow
 from pitlane.arms import Arm, Registry
 from pitlane.config import Config
 
@@ -62,16 +62,34 @@ def run_cell(
     if not dry_run:
         stack.reset_kv_metrics(config)
 
-    result = workflow.run(
-        config, arm, cell,
-        question_id=question_id, count=count, trace_mode=trace_mode, dry_run=dry_run,
+    monitor = resources.Monitor(
+        config.run_dir / "resources.csv",
+        scope={"arm": arm.name, "question_id": question_id, "rep": rep},
+        gpu=config.gpu,
+        disk_path=config.paths.bench_root,
+        interval_s=config.resource_interval_s,
+        ram_floor_gb=config.abort_free_ram_gb,
+        vram_ceiling_frac=config.abort_vram_frac,
     )
+    with monitor:
+        result = workflow.run(
+            config, arm, cell,
+            question_id=question_id, count=count, trace_mode=trace_mode,
+            dry_run=dry_run, abort=monitor.aborted,
+        )
 
     collected = metrics_mod.collect(
         cell, arm=arm.name, question_id=question_id, rep=rep,
         t0=result.started_ts, t1=result.finished_ts, cache_state=cache_state,
         lead_min_s=config.prefetch_lead_min_s,
     )
+    if result.aborted:
+        # Ahead of the exit-code warning: "killed" explains the non-zero code,
+        # and a cell that ran out of memory is not a cell with a bad number in
+        # it, it is a cell with no number in it.
+        collected.warnings.append(
+            f"aborted on resources: {monitor.reason or 'threshold crossed'}"
+        )
     if result.exit_code != 0:
         collected.warnings.append(f"workflow exited {result.exit_code}")
     if arm.name == "ours" and collected.total_prefetches == 0:

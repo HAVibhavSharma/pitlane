@@ -8,8 +8,11 @@ flags differently, and that is the whole of the difference: one counts
 from __future__ import annotations
 
 import logging
+import os
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from datetime import datetime
 from dataclasses import dataclass
@@ -64,6 +67,7 @@ class WorkflowResult:
     started_ts: float
     finished_ts: float
     log_path: Path
+    aborted: bool = False
 
 
 def run(
@@ -74,6 +78,7 @@ def run(
     question_id: str | None,
     count: int = 1,
     trace_mode: str = "pinned",
+    abort: "threading.Event | None" = None,
     extra_env: dict[str, str] | None = None,
     dry_run: bool = False,
 ) -> WorkflowResult:
@@ -162,17 +167,56 @@ def run(
     # The runner's own stamp for TTFT: the question is dispatched now, and
     # nothing downstream records that instant.
     (cell / "question_started_ts").write_text(f"{started!r}\n")
+    child_env = config_mod.venv_env(
+        config.paths.workflow_venv, {**dict(_os_environ()), **env}
+    )
+    was_aborted = False
     with log_path.open("w") as log:
-        process = subprocess.run(
-            command, cwd=repo,
-            env=config_mod.venv_env(
-                config.paths.workflow_venv, {**dict(_os_environ()), **env}
-            ),
-            stdout=log, stderr=subprocess.STDOUT,
+        # Popen rather than `subprocess.run`, so the wait is interruptible. The
+        # child gets its own session, which makes the whole workflow tree one
+        # signalling unit -- ODR spawns researchers, and terminating only the
+        # parent would leave them running against a server about to be killed.
+        process = subprocess.Popen(
+            command, cwd=repo, env=child_env,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
+        while True:
+            try:
+                process.wait(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if abort is not None and abort.is_set() and not was_aborted:
+                was_aborted = True
+                logger.error("resource abort; terminating the workflow")
+                _terminate(process)
+
     finished = time.time()
     logger.info("workflow exited %s after %.1fs", process.returncode, finished - started)
-    return WorkflowResult(process.returncode, started, finished, log_path)
+    return WorkflowResult(
+        process.returncode, started, finished, log_path, aborted=was_aborted,
+    )
+
+
+def _terminate(process: "subprocess.Popen", grace_s: float = 20.0) -> None:
+    """SIGTERM the workflow's process group, then SIGKILL what is left."""
+    try:
+        group = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        process.wait(timeout=grace_s)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _os_environ() -> dict[str, str]:

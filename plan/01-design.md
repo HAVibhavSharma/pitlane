@@ -43,7 +43,7 @@ boot is a config flag, not the default.
 | Component | Responsibility |
 |---|---|
 | `preflight` | GPU 0 free (`nvidia-smi`: no other process, free VRAM ≥ threshold), host RAM free ≥ `l1-size-gb` + margin, `/disk2` free space, port 8000 unbound, redis reachable (arm `ours` only). Hard-fails before anything starts. |
-| `resource_monitor` | Samples GPU util/mem, host RAM, disk every ~5 s into `resources.csv` for the whole run; kills the run if RAM or VRAM crosses the abort threshold. |
+| `resource_monitor` | Samples GPU util/mem, host RAM (`MemAvailable`, since page cache is reclaimable) and disk every `BENCH_RESOURCE_INTERVAL_S` into `resources.csv`, scoped by arm/question/rep, flushed per sample so the row before a teardown survives. Aborts the cell when free RAM falls below `BENCH_ABORT_FREE_RAM_GB` — the alternative is the kernel's OOM killer picking its own victim, as likely vLLM or pitlane as whatever grew. The VRAM ceiling (`BENCH_ABORT_VRAM_FRAC`) is **off by default**: vLLM claims its share up front, so a nearly full card is a working one, and a ceiling would fire on every healthy run. A floor that cannot be read says so once rather than silently never firing. |
 | `tmux_supervisor` | Fixed session names (`lmcache`, `vllm_baseline`, `vllm_continuum`, `vllm_ours`, `workflow`). Create / kill / send-keys / `capture-pane -pJ` / wait-for-exit-sentinel. Idle sessions from a crashed run are reaped at start. |
 | `server_manager` stop path | **Kill the tmux session, then make sure the server is gone.** `tmux.start` sends its command with `send-keys`, so the pane holds a shell and the server is its child: `kill-session` reaps the shell and orphans the server, which keeps the port and — through an orphaned EngineCore that holds no port at all — the VRAM. Stopping therefore escalates on whatever still listens: grace, `SIGTERM` to the process *group*, `SIGKILL`, each with its own wait. An interrupt tears the stack down on the way out for the same reason — `stop_server` kills the tmux session before it waits, so a Ctrl-C after that point loses the only handle anything had on the process. `--keep-stack` is honoured. `pitlane down` runs the same escalation on demand. |
 | `lmcache_manager` | **Wipe and restart are one atomic operation**: stop the running LMCache server, delete `$LMCACHE_L2_DIR`, start it again, wait for the port. Never one without the other — the server's L1 index is in memory, so wiping the dir under a live server leaves it serving keys whose backing files are gone, and restarting without wiping carries the previous cell's L2 in. Blank `LMCACHE_L2_DIR` omits `--l2-adapter` entirely and LMCache runs L1-only, where the restart alone is the wipe. Skipped for `continuum` (that arm uses `LMCACHE_CONFIG_FILE` + `LMCacheConnectorV1`, no separate server). |
@@ -94,6 +94,9 @@ BENCH_GPU=0
 BENCH_MIN_FREE_RAM_GB=260        # l1-size-gb 200 + margin
 BENCH_SERVER_READY_TIMEOUT_S=1800
 BENCH_PREFETCH_LEAD_MIN_S=0.1    # below this lead a phantom counts as late
+BENCH_ABORT_FREE_RAM_GB=32       # abort the cell below this much free RAM
+BENCH_ABORT_VRAM_FRAC=0          # 0 = no VRAM ceiling (vLLM fills the card by design)
+BENCH_RESOURCE_INTERVAL_S=5
 ```
 
 Each vLLM build is installed into **its own virtualenv**, and the four `*_VENV`

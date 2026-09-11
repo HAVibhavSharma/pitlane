@@ -137,6 +137,14 @@ class Config:
     redis_url: str = "redis://127.0.0.1:6379/0"
     # Below this lead a phantom is counted late -- see `metrics.LEAD_MIN_S`.
     prefetch_lead_min_s: float = 0.1
+    # Live ceilings, watched for the length of each cell. The RAM floor is the
+    # one that matters: LMCache's L1 pool grows toward `--l1-size-gb` during a
+    # run, and the alternative to aborting is the kernel's OOM killer choosing
+    # its own victim. The VRAM ceiling is off by default -- vLLM claims its
+    # share up front, so a nearly full card is a working one.
+    abort_free_ram_gb: float = 32.0
+    abort_vram_frac: float = 0.0
+    resource_interval_s: float = 5.0
 
     # Resolved at run time, not from the env file.
     run_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -202,6 +210,9 @@ class Config:
             server_ready_timeout_s=float(env.get("BENCH_SERVER_READY_TIMEOUT_S", "1800")),
             redis_url=env.get("KV_FORECAST_REDIS_URL", "redis://127.0.0.1:6379/0"),
             prefetch_lead_min_s=float(env.get("BENCH_PREFETCH_LEAD_MIN_S", "0.1")),
+            abort_free_ram_gb=float(_or(env, "BENCH_ABORT_FREE_RAM_GB", "32")),
+            abort_vram_frac=float(_or(env, "BENCH_ABORT_VRAM_FRAC", "0")),
+            resource_interval_s=float(_or(env, "BENCH_RESOURCE_INTERVAL_S", "5")),
         )
 
     # -- artifact layout --------------------------------------------------
