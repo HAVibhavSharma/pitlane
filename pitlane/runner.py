@@ -13,6 +13,7 @@ import re
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Any
 
 from pitlane import metrics as metrics_mod
 from pitlane import report, resources, stack, timeline, workflow
@@ -119,24 +120,55 @@ def run_cell(
 
     for warning in collected.warnings:
         logger.warning("%s/%s: %s", arm.name, question_id, warning)
-    # Last, and only on the way out: the marker a resume trusts has to mean the
+    # Last, and only on the way out: the entry a resume trusts has to mean the
     # cell got all the way here. Written after the artifacts it vouches for.
-    _write_status(cell, exit_code=result.exit_code, aborted=result.aborted)
+    _record_cell(config.run_dir, arm.name, question_id, rep,
+                 exit_code=result.exit_code, aborted=result.aborted)
     return CellResult(arm.name, question_id, rep, cell, collected, result.exit_code)
 
 
-_STATUS = "cell_status.json"
+# The resume ledger. One hidden file at the top of the run, not a marker in
+# every cell: a cell directory is a result, and a result should carry what was
+# measured and nothing about how the run was driven. Anyone reading the tree --
+# or copying one cell out of it -- sees exactly what they saw before resume
+# existed.
+_LEDGER = ".pitlane-progress.json"
 
 
-def _write_status(cell: Path, *, exit_code: int, aborted: bool) -> None:
-    (cell / _STATUS).write_text(json.dumps({
+def _cell_key(arm: str, question_id: str, rep: int) -> str:
+    return f"{arm}/{question_id}/rep{rep}"
+
+
+def _read_ledger(run_dir: Path) -> dict[str, dict[str, Any]]:
+    try:
+        body = json.loads((run_dir / _LEDGER).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return body.get("cells", {}) if isinstance(body, dict) else {}
+
+
+def _record_cell(run_dir: Path, arm: str, question_id: str, rep: int,
+                 *, exit_code: int, aborted: bool) -> None:
+    """Note that this cell reached the end, atomically.
+
+    Written through a temporary file and renamed, because the thing this
+    records is survival of an interrupt -- a ledger torn in half by the kill it
+    is meant to outlive would take every earlier cell with it.
+    """
+    cells = _read_ledger(run_dir)
+    cells[_cell_key(arm, question_id, rep)] = {
         "exit_code": exit_code,
         "aborted": aborted,
         "finished_at": time.time(),
-    }, indent=2) + "\n")
+    }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tmp = run_dir / f"{_LEDGER}.tmp"
+    tmp.write_text(json.dumps({"cells": cells}, indent=2) + "\n")
+    tmp.replace(run_dir / _LEDGER)
 
 
-def completed(cell: Path) -> bool:
+def completed(run_dir: Path, arm: str, question_id: str, rep: int,
+              cell: Path) -> bool:
     """Whether this cell finished cleanly enough to skip on a resume.
 
     Deliberately strict. A cell is worth keeping only if the workflow exited 0,
@@ -144,18 +176,14 @@ def completed(cell: Path) -> bool:
     disk -- anything else is re-run, because an eight-minute boot is cheaper
     than a number nobody can account for.
 
-    A cell that is *mid-flight* when the run dies has no status file at all,
-    which is the case this exists to catch: its artifacts look complete and its
-    numbers are half a run.
+    A cell that was *mid-flight* when the run died has no ledger entry, which
+    is the case this exists to catch: its directory looks complete and its
+    numbers are half a question.
     """
-    status = cell / _STATUS
-    if not status.exists() or not (cell / "metrics.json").exists():
+    entry = _read_ledger(run_dir).get(_cell_key(arm, question_id, rep))
+    if entry is None or not (cell / "metrics.json").exists():
         return False
-    try:
-        body = json.loads(status.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    return body.get("exit_code") == 0 and not body.get("aborted")
+    return entry.get("exit_code") == 0 and not entry.get("aborted")
 
 
 def _resumed(config: Config, arm: Arm, question_id: str, rep: int,
@@ -166,7 +194,7 @@ def _resumed(config: Config, arm: Arm, question_id: str, rep: int,
     run-level CSVs. They were appended by the attempt that failed, and every
     reader downstream would otherwise count the cell twice.
     """
-    if completed(cell):
+    if completed(config.run_dir, arm.name, question_id, rep, cell):
         try:
             stored = metrics_mod.Metrics(**{
                 key: value

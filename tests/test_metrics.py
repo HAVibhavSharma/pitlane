@@ -612,10 +612,14 @@ def check_routing_from_log(tmp: Path) -> None:
 def check_resume(tmp: Path) -> None:
     """A resumed run skips what finished and re-runs the rest, once.
 
-    The marker has to mean the cell reached the end. A cell killed mid-flight
-    has artifacts that look complete and numbers that are half a run, and it is
-    the case a resume most has to catch -- so absence of the marker, not
-    presence of the outputs, is what decides.
+    The ledger has to mean the cell reached the end. A cell killed mid-flight
+    has artifacts that look complete and numbers that cover part of a question,
+    and it is the case a resume most has to catch -- so absence of an entry,
+    not presence of the outputs, is what decides.
+
+    The ledger is one hidden file at the top of the run: a cell directory is a
+    result and carries only what was measured, exactly as it did before resume
+    existed.
     """
     import csv as _csv
     from pitlane import report, runner
@@ -629,13 +633,23 @@ def check_resume(tmp: Path) -> None:
             {"arm": arm, "question_id": "batch2", "rep": 1, "requests": 43,
              "a_column_from_a_later_version": 1}))
         if exit_code is not None:
-            (c / "cell_status.json").write_text(json.dumps(
-                {"exit_code": exit_code, "aborted": False, "finished_at": 1.0}))
+            runner._record_cell(run, arm, "batch2", 1,
+                                exit_code=exit_code, aborted=False)
         return c
 
-    assert runner.completed(cell("baseline", exit_code=0)) is True
-    assert runner.completed(cell("continuum", exit_code=1)) is False
-    assert runner.completed(cell("ours")) is False          # killed mid-flight
+    baseline = cell("baseline", exit_code=0)
+    continuum = cell("continuum", exit_code=1)
+    ours = cell("ours")                              # killed mid-flight
+    assert runner.completed(run, "baseline", "batch2", 1, baseline) is True
+    assert runner.completed(run, "continuum", "batch2", 1, continuum) is False
+    assert runner.completed(run, "ours", "batch2", 1, ours) is False
+
+    # The cell directories carry results and nothing about the run mechanism.
+    for c in (baseline, continuum, ours):
+        assert sorted(p.name for p in c.iterdir()) == ["metrics.json"], sorted(
+            p.name for p in c.iterdir())
+    assert (run / ".pitlane-progress.json").exists()
+    assert not list(run.glob("*/*/*/*status*"))
 
     results = run / "results.csv"
     with results.open("w", newline="") as handle:
@@ -650,14 +664,17 @@ def check_resume(tmp: Path) -> None:
     assert [r["arm"] for r in report.load_rows(results)] == ["baseline", "ours"]
     # Idempotent: a resume of a resume must not keep rewriting the file.
     assert report.drop_cell_rows(results, "continuum", "batch2", 1) == 0
+    # The CSV keeps the columns it always had; resume adds none.
+    assert list(report.load_rows(results)[0]) == [
+        "arm", "question_id", "rep", "requests"]
 
     # A stored metrics.json is rebuilt even when it carries a column this
     # version does not know, which would otherwise re-run a finished cell.
-    stored = json.loads((run / "baseline" / "batch2" / "rep1" / "metrics.json").read_text())
+    stored = json.loads((baseline / "metrics.json").read_text())
     restored = metrics.Metrics(**{k: v for k, v in stored.items()
                                   if k in runner._METRIC_FIELDS})
     assert restored.arm == "baseline" and restored.requests == 43
-    print("resume: 1 skipped, 2 re-run, stale rows dropped once")
+    print("resume: 1 skipped, 2 re-run, ledger out of the results tree")
     print("\nall resume assertions passed")
 
 
