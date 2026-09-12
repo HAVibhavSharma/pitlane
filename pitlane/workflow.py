@@ -44,6 +44,20 @@ ODR = Adapter("odr", "--max-queries", "--completions-per-query", None)
 SWE = Adapter("swe-agent", "--max-instances", "--completions-per-instance", "--instance-ids")
 
 
+def _accepts_completed_log(repo: Path, script: str) -> bool:
+    """Whether this arm's script takes `--completed-log`.
+
+    Sniffed from the script the arm actually runs, for the same reason the
+    adapter is: the repo is the thing that changed. An older checkout, or one
+    of the two evaluation scripts patched and not the other, then runs exactly
+    as before instead of dying on an unknown flag.
+    """
+    try:
+        return "--completed-log" in (repo / script).read_text()
+    except OSError:
+        return False
+
+
 def detect(repo: Path) -> Adapter:
     """Pick the adapter by the flags the repo's script actually accepts.
 
@@ -80,6 +94,7 @@ def run(
     trace_mode: str = "pinned",
     abort: "threading.Event | None" = None,
     extra_env: dict[str, str] | None = None,
+    completed_log: Path | None = None,
     dry_run: bool = False,
 ) -> WorkflowResult:
     """Run one question and return when it is done.
@@ -179,6 +194,13 @@ def run(
         *adapter.selection_args(count, question_id),
         *arm.workflow_args,
     ]
+    # Per-question resume inside a batch cell. A 50-question cell is one
+    # workflow process, so without this an interrupt at question 40 costs all
+    # 40: the cell is the unit pitlane can skip, and the questions inside it
+    # are only the workflow's to track. Passed only where the workflow
+    # advertises the flag, so an older checkout still runs.
+    if completed_log is not None and _accepts_completed_log(repo, arm.workflow_script):
+        command += ["--completed-log", str(completed_log)]
     log_path = cell / "workflow.log"
     (cell / "command.txt").write_text(" ".join(shlex.quote(c) for c in command) + "\n")
 
@@ -189,12 +211,28 @@ def run(
     started = time.time()
     # The runner's own stamp for TTFT: the question is dispatched now, and
     # nothing downstream records that instant.
-    (cell / "question_started_ts").write_text(f"{started!r}\n")
+    #
+    # Kept from the first attempt when there is one. The collector windows the
+    # cell as [this stamp, finish], and a resumed cell's stats directory holds
+    # the rows of every attempt -- restamping would put the earlier questions
+    # before the window and silently drop them, which is the same shape as a
+    # run that answered fewer questions.
+    launched = started
+    stamp = cell / "question_started_ts"
+    if not stamp.exists():
+        stamp.write_text(f"{started!r}\n")
+    else:
+        try:
+            started = float(stamp.read_text().strip())
+        except ValueError:
+            stamp.write_text(f"{started!r}\n")
     child_env = config_mod.venv_env(
         config.paths.workflow_venv, {**dict(_os_environ()), **env}
     )
     was_aborted = False
-    with log_path.open("w") as log:
+    # Appended for the same reason as the server log: a resumed cell is one
+    # cell, and the questions the first attempt answered are part of it.
+    with log_path.open("a") as log:
         # Popen rather than `subprocess.run`, so the wait is interruptible. The
         # child gets its own session, which makes the whole workflow tree one
         # signalling unit -- ODR spawns researchers, and terminating only the
@@ -215,7 +253,11 @@ def run(
                 _terminate(process)
 
     finished = time.time()
-    logger.info("workflow exited %s after %.1fs", process.returncode, finished - started)
+    # This attempt's own duration. `started` may belong to an earlier attempt
+    # of a resumed cell, which is right for the metrics window and wrong for
+    # saying how long this process ran.
+    logger.info("workflow exited %s after %.1fs",
+                process.returncode, finished - launched)
     return WorkflowResult(
         process.returncode, started, finished, log_path, aborted=was_aborted,
     )

@@ -82,6 +82,8 @@ def run_cell(
             config, arm, cell,
             question_id=question_id, count=count, trace_mode=trace_mode,
             dry_run=dry_run, abort=monitor.aborted,
+            completed_log=_questions_log(config.run_dir, arm.name,
+                                         question_id, rep),
         )
 
     collected = metrics_mod.collect(
@@ -133,6 +135,18 @@ def run_cell(
 # or copying one cell out of it -- sees exactly what they saw before resume
 # existed.
 _LEDGER = ".pitlane-progress.json"
+_PROGRESS_DIR = ".pitlane"
+
+
+def _questions_log(run_dir: Path, arm: str, question_id: str, rep: int) -> Path:
+    """Where the workflow records the questions of this cell it has finished.
+
+    Beside the ledger and hidden for the same reason: which questions a
+    previous attempt got through is how the run was driven, not something it
+    measured, and a cell directory should read the same as one produced
+    without resume.
+    """
+    return run_dir / _PROGRESS_DIR / f"{arm}__{question_id}__rep{rep}.log"
 
 
 def _cell_key(arm: str, question_id: str, rep: int) -> str:
@@ -282,6 +296,14 @@ def run_matrix(
                     if done is not None:
                         results.append(done)
                         continue
+                else:
+                    # Not a resume: this cell starts from nothing. A questions
+                    # log left by an earlier run under the same id would
+                    # otherwise make the workflow skip questions it was asked
+                    # to run, and the cell would report a batch it never
+                    # executed.
+                    _questions_log(config.run_dir, arm.name, question,
+                                   rep).unlink(missing_ok=True)
                 started = time.time()
                 results.append(
                     run_cell(

@@ -151,7 +151,11 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     command = (
         f"{shlex.quote(config_mod.venv_bin(venv, 'vllm'))} "
         f"serve {shlex.quote(config.model_name)} --port {config.port} "
-        f"{args} > {shlex.quote(str(log_path))} 2>&1"
+        # Appended, not truncated. A resumed cell boots a second server into
+        # the same directory, and `>` would erase the first attempt's log --
+        # which holds the echo markers and access lines for every question
+        # that already ran, and which the collector reads as one cell.
+        f"{args} >> {shlex.quote(str(log_path))} 2>&1"
     )
     tmux.kill(VLLM_SESSION)
     # Reclaim rather than merely wait: a previous run killed by Ctrl-C leaves an
