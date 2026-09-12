@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import signal
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -188,60 +187,6 @@ def _resumed(config: Config, arm: Arm, question_id: str, rep: int,
     return None
 
 
-class _Drain:
-    """Turn the first interrupt into "stop after this cell".
-
-    A cell is the unit that produces a number: the workflow answers the
-    question, the collector reads the stats the server wrote, and the CSVs and
-    charts are written from that. Interrupting in the middle leaves a cell
-    whose directory looks finished and whose numbers cover part of a question
-    -- worse than no cell at all, because it is a wrong row that gets averaged
-    against the other arms.
-
-    So the first Ctrl-C is recorded, not obeyed. The question in flight runs to
-    the end, its artifacts are collected and its status written, and the run
-    stops before the next cell starts. Everything finished is intact and
-    `--resume` continues from there.
-
-    The second is obeyed at once: pressing it twice means now, and a run with a
-    wedged server has to stay interruptible. That drops the cell in flight,
-    which the missing status file already accounts for.
-
-    Only the parent is signalled either way -- the workflow child is started
-    with `start_new_session`, so a terminal's Ctrl-C never reaches the question
-    itself and the drain is genuinely free.
-    """
-
-    def __init__(self) -> None:
-        self.requested = False
-        self._previous = None
-
-    def __enter__(self) -> "_Drain":
-        try:
-            self._previous = signal.signal(signal.SIGINT, self._handle)
-        except ValueError:
-            # Not the main thread: a run driven from elsewhere keeps the
-            # default behaviour rather than failing to start.
-            self._previous = None
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        if self._previous is not None:
-            signal.signal(signal.SIGINT, self._previous)
-
-    def _handle(self, _signum, _frame) -> None:
-        if self.requested:
-            logger.warning("second interrupt: stopping now, dropping this cell")
-            if self._previous is not None:
-                signal.signal(signal.SIGINT, self._previous)
-            raise KeyboardInterrupt
-        self.requested = True
-        logger.warning(
-            "interrupt received: finishing the question in flight, then "
-            "stopping. Press Ctrl-C again to stop immediately."
-        )
-
-
 _BATCH_ID = re.compile(r"^batch(\d+)$")
 
 
@@ -298,40 +243,30 @@ def run_matrix(
     ran last, which is exactly the bias the study is trying to avoid.
     """
     results: list[CellResult] = []
-    planned = len(questions) * reps * len(arms)
-    with _Drain() as drain:
-        for question in questions:
-            cell_count = question_count(question, count)
-            for rep in range(1, reps + 1):
-                for arm_name in arms:
-                    if drain.requested:
-                        logger.warning(
-                            "stopping after %d of %d cell(s); continue with "
-                            "--resume --run-id %s",
-                            len(results), planned, config.run_id,
-                        )
-                        return results
-                    arm = registry[arm_name]
-                    if resume:
-                        cell = config.cell_dir(arm.name, question, rep)
-                        done = _resumed(config, arm, question, rep, cell)
-                        if done is not None:
-                            results.append(done)
-                            continue
-                    started = time.time()
-                    results.append(
-                        run_cell(
-                            config, arm, question, rep,
-                            count=cell_count,
-                            # A batch cell's later questions are only warm if
-                            # the workflow does not flush between them. With
-                            # the flush on, every question starts cold, and
-                            # saying otherwise would make the reporter refuse
-                            # to average cells that are in fact comparable with
-                            # isolated ones.
-                            cache_state=_cache_state(cell_count, arm),
-                            dry_run=dry_run, keep_stack=keep_stack,
-                        )
+    for question in questions:
+        cell_count = question_count(question, count)
+        for rep in range(1, reps + 1):
+            for arm_name in arms:
+                arm = registry[arm_name]
+                if resume:
+                    cell = config.cell_dir(arm.name, question, rep)
+                    done = _resumed(config, arm, question, rep, cell)
+                    if done is not None:
+                        results.append(done)
+                        continue
+                started = time.time()
+                results.append(
+                    run_cell(
+                        config, registry[arm_name], question, rep,
+                        count=cell_count,
+                        # A batch cell's later questions are only warm if the
+                        # workflow does not flush between them. With the flush
+                        # on every question starts cold, and saying otherwise
+                        # would make the reporter refuse to average cells that
+                        # are in fact comparable with isolated ones.
+                        cache_state=_cache_state(cell_count, registry[arm_name]),
+                        dry_run=dry_run, keep_stack=keep_stack,
                     )
-                    logger.info("cell took %.0fs", time.time() - started)
+                )
+                logger.info("cell took %.0fs", time.time() - started)
     return results
