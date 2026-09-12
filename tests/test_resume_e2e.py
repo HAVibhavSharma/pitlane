@@ -387,6 +387,21 @@ def main() -> int:
         f"two attempts did not assemble into one cell")
     assert len({r["job_id"] for r in collected.per_request}) == len(plan)
 
+    # The total alone would pass on a cell that lost one request and counted
+    # another twice, which is exactly the shape a bad resume produces: a
+    # question re-run from the start duplicates its early rows and the
+    # interrupted one is short.
+    ids = [row["request_id"] for row in collected.per_request]
+    duplicated = sorted({i for i in ids if ids.count(i) > 1})
+    assert not duplicated, f"duplicate request rows: {duplicated[:5]}"
+    counts: dict[str, int] = {}
+    for row in collected.per_request:
+        counts[row["job_id"]] = counts.get(row["job_id"], 0) + 1
+    short = {job: (counts.get(job, 0), expected)
+             for job, expected in plan if counts.get(job, 0) != expected}
+    assert not short, f"questions with the wrong number of requests: {short}"
+    print(f"   {len(ids)} rows, no duplicates, every question complete")
+
     # What `run_cell` writes, and what `completed()` requires alongside the
     # ledger entry: an entry without the collection it vouches for is a cell
     # whose artifacts were removed, and must be re-run.
