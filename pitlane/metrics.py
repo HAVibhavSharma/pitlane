@@ -116,26 +116,86 @@ def _routing_lines(cell: Path) -> dict[str, dict[str, str]]:
     return routing
 
 
-def _apply_routing(rows: list[dict[str, Any]], cell: Path) -> None:
-    """Fill in routing fields the stats rows lack, from the log, in place.
+def _hbm_lines(cell: Path) -> dict[str, dict[str, int]]:
+    """`request_id -> {hit_tokens, query_tokens}` from the server's own summary.
 
-    Only ever fills a gap: a build that records the fields itself is the
-    authority on its own rows, and a log line must never overwrite one.
+    Every build writes a `kv_hbm_ttft` line per request carrying the token
+    breakdown behind its latency. `hit_tokens` there is the local prefix-cache
+    hit -- the same quantity the newer builds put in
+    `num_local_cached_tokens` -- so a build that reports only a combined
+    `num_cached_tokens` can still be given the split its rows lack.
     """
-    missing = [r for r in rows
-               if not r.get("agent_id") and not r.get("langgraph_node")]
-    if not missing:
-        return
-    routing = _routing_lines(cell)
-    if not routing:
-        return
-    for row in missing:
-        fields = routing.get(str(row.get("request_id") or ""))
-        if not fields:
+    log = cell / "server.log"
+    if not log.exists():
+        return {}
+    text = log.read_text(errors="replace")
+    year = _log_year(text, log)
+    out: dict[str, dict[str, int]] = {}
+    for line in text.splitlines():
+        if "kv_hbm_ttft" not in line:
             continue
-        for key, value in fields.items():
-            if not row.get(key):
-                row[key] = value
+        fields = dict(_ECHO_FIELD.findall(line.split("kv_hbm_ttft", 1)[1]))
+        request_id = fields.get("req")
+        if not request_id or request_id == "-":
+            continue
+        numbers: dict[str, int] = {}
+        for key in ("hit_tokens", "query_tokens"):
+            try:
+                value = int(fields.get(key, ""))
+            except ValueError:
+                continue
+            # -1 is the sentinel for a request that never reached a cache
+            # lookup; it is an absence, not a count of zero.
+            if value >= 0:
+                numbers[key] = value
+        if "hit_tokens" in numbers:
+            out[request_id] = numbers
+    return out
+
+
+def _apply_routing(rows: list[dict[str, Any]], cell: Path) -> None:
+    """Fill in fields the stats rows lack, from the server's own log, in place.
+
+    Only ever fills a gap: a build that records a field itself is the authority
+    on its own rows, and a log line must never overwrite one.
+
+    Two gaps, both belonging to the older build. It carries no `langgraph_node`
+    into the engine, so its rows cannot be placed on a lane; and it reports one
+    combined `num_cached_tokens` where the others split local from external, so
+    its hit rate would mean something different from every other arm's. Both
+    are answerable from the log, keyed on the request id the rows already
+    carry.
+    """
+    needs_routing = [r for r in rows
+                     if not r.get("agent_id") and not r.get("langgraph_node")]
+    needs_split = [r for r in rows if r.get("num_local_cached_tokens") is None]
+
+    if needs_routing:
+        routing = _routing_lines(cell)
+        for row in needs_routing:
+            fields = routing.get(str(row.get("request_id") or ""))
+            if not fields:
+                continue
+            for key, value in fields.items():
+                if not row.get(key):
+                    row[key] = value
+
+    if needs_split:
+        hbm = _hbm_lines(cell)
+        for row in needs_split:
+            numbers = hbm.get(str(row.get("request_id") or ""))
+            if not numbers:
+                continue
+            local = numbers["hit_tokens"]
+            row["num_local_cached_tokens"] = local
+            # The combined figure is local + external by construction -- the
+            # scheduler sets it from `num_new_local_computed_tokens +
+            # num_external_computed_tokens` -- so the remainder is the external
+            # tier, and this arm's columns finally mean what every other arm's
+            # do.
+            combined = row.get("num_cached_tokens")
+            if combined is not None and row.get("num_external_cached_tokens") is None:
+                row["num_external_cached_tokens"] = max(int(combined) - local, 0)
 
 
 def _served_chats(cell: Path, t0: float | None, t1: float | None) -> int | None:

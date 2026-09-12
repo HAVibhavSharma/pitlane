@@ -516,6 +516,62 @@ def check_unsplit_cached_tokens(tmp: Path) -> None:
     print("\nall cached-token assertions passed")
 
 
+def check_split_from_log(tmp: Path) -> None:
+    """An unsplit build gets its local/external split from its own log.
+
+    Its rows carry one combined `num_cached_tokens`, so its hit rate measured
+    something different from every other arm's -- local+external against
+    local-only -- and the two were being read side by side. The `kv_hbm_ttft`
+    line it already writes carries the local hit per request, and the combined
+    figure minus that is the external tier.
+    """
+    cell = tmp / "continuum" / "q10" / "rep1"
+    _write(cell / "stats" / "finished_requests_engine0_x.jsonl", [
+        dict(request_id="chatcmpl-a", job_id="1", arrival_ts=T0 + 1,
+             finish_ts=T0 + 5, num_prompt_tokens=10_000,
+             num_cached_tokens=4_000, num_generation_tokens=100),
+        dict(request_id="chatcmpl-b", job_id="1", arrival_ts=T0 + 10,
+             finish_ts=T0 + 15, num_prompt_tokens=10_000,
+             num_cached_tokens=1_000, num_generation_tokens=100),
+        # No line for this one: it stays unsplit rather than borrowing.
+        dict(request_id="chatcmpl-c", job_id="1", arrival_ts=T0 + 20,
+             finish_ts=T0 + 25, num_prompt_tokens=10_000,
+             num_cached_tokens=500, num_generation_tokens=100),
+    ])
+    (cell / "server.log").write_text(
+        "(EngineCore pid=1) INFO 2026-09-12 03:16:01.272 [hbm_summary.py:307] "
+        "kv_hbm_ttft variant=continuum epoch=2 req=chatcmpl-a ttft_ms=556.3 "
+        "query_tokens=10000 hit_tokens=3000 external_hit_tokens=0 "
+        "cold_tokens=7000 preempted=0\n"
+        "(EngineCore pid=1) INFO 2026-09-12 03:16:05.391 [hbm_summary.py:307] "
+        "kv_hbm_ttft variant=continuum epoch=2 req=chatcmpl-b ttft_ms=932.0 "
+        "query_tokens=10000 hit_tokens=1000 external_hit_tokens=0 "
+        "cold_tokens=9000 preempted=0\n"
+        # A request that never reached a lookup reports -1, an absence.
+        "(EngineCore pid=1) INFO 2026-09-12 03:16:09.000 [hbm_summary.py:307] "
+        "kv_hbm_ttft variant=continuum epoch=2 req=chatcmpl-d ttft_ms=10.0 "
+        "query_tokens=-1 hit_tokens=-1 external_hit_tokens=0 cold_tokens=-1 "
+        "preempted=0\n"
+    )
+
+    m = metrics.collect(cell, arm="continuum", question_id="q10",
+                        t0=T0, t1=T0 + 100)
+    by_id = {r["request_id"]: r for r in m.per_request}
+    # Local only, as every other arm reports it.
+    assert by_id["chatcmpl-a"]["token_hits"] == 3_000, by_id["chatcmpl-a"]
+    # 4000 combined - 3000 local = 1000 external, by construction.
+    assert by_id["chatcmpl-a"]["external_token_hits"] == 1_000, by_id["chatcmpl-a"]
+    assert by_id["chatcmpl-b"]["token_hits"] == 1_000
+    assert by_id["chatcmpl-b"]["external_token_hits"] == 0
+    # No line: the combined figure stands, and the cell says so.
+    assert by_id["chatcmpl-c"]["token_hits"] == 500
+    assert m.token_hits == 4_500, m.token_hits
+    assert abs(m.kv_hit_rate - 4_500 / 30_000) < 1e-9, m.kv_hit_rate
+    print(f"split from log: local {m.token_hits}, external "
+          f"{m.external_token_hits}, rate {m.kv_hit_rate:.2%}")
+    print("\nall split assertions passed")
+
+
 def check_truncated_stats(tmp: Path) -> None:
     """The access log answers more chats than the stats file has rows.
 
@@ -826,6 +882,7 @@ if __name__ == "__main__":
         check_timeline(Path(tmp))
         check_tool_spans(Path(tmp))
         check_unsplit_cached_tokens(Path(tmp))
+        check_split_from_log(Path(tmp))
         check_truncated_stats(Path(tmp))
         check_routing_from_log(Path(tmp))
         check_resume(Path(tmp))
