@@ -46,7 +46,7 @@ from pitlane.arms import Arm  # noqa: E402
 # `workflow.run` the way ODR is.
 STUB = '''\
 """Stands in for run_evaluate.py: N questions, each K requests of X seconds."""
-import argparse, asyncio, json, os, signal, sys, time
+import argparse, asyncio, itertools, json, os, signal, sys, time
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -91,10 +91,22 @@ def emit(job_id, index):
 
 async def main():
     log = Path(args.completed_log) if args.completed_log else None
-    done = set()
+    done, highest = set(), 0
     if log is not None and log.exists():
-        done = {int(x) for x in log.read_text().split() if x.strip().isdigit()}
+        for line in log.read_text().splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            done.add(entry["question"])
+            for jid in entry["job_ids"]:
+                highest = max(highest, int(jid))
     print(f"stub: resuming, {len(done)} question(s) already done", flush=True)
+
+    # As run_evaluate does: a process-local counter, continued past whatever a
+    # previous attempt used. Modelled because getting this wrong is invisible
+    # in the totals -- the rows are all there, grouped under the wrong
+    # question.
+    counter = itertools.count(highest + 1)
 
     jobs = [
         {"index": i + 1, "job_id": job_id, "requests": requests,
@@ -121,10 +133,11 @@ async def main():
             pass
 
     async def question(job):
+        job["assigned"] = str(next(counter))
         print(f"stub: question {job['index']} started", flush=True)
         for index in range(job["requests"]):
             await asyncio.sleep(args.latency)      # a vLLM call
-            emit(job["job_id"], index)
+            emit(job["assigned"], index)
         print(f"stub: question {job['index']} finished", flush=True)
         return job
 
@@ -151,7 +164,8 @@ async def main():
             if log is not None:
                 log.parent.mkdir(parents=True, exist_ok=True)
                 with log.open("a") as handle:
-                    handle.write(f"{job['index']}\\n")
+                    handle.write(json.dumps({"question": job["index"],
+                                             "job_ids": [job["assigned"]]}) + "\\n")
                     handle.flush()
                     os.fsync(handle.fileno())
         if not stop:
@@ -254,6 +268,26 @@ def interrupt_when_running(log: Path, question: int, settle_s: float,
     return thread
 
 
+def read_done(log: Path) -> list[int]:
+    """Question indices the workflow has recorded as finished."""
+    if not log.exists():
+        return []
+    return sorted(json.loads(line)["question"]
+                  for line in log.read_text().splitlines() if line.strip())
+
+
+def read_job_ids(log: Path) -> dict[int, list[str]]:
+    """`question index -> the job ids it ran under`."""
+    out: dict[int, list[str]] = {}
+    if not log.exists():
+        return out
+    for line in log.read_text().splitlines():
+        if line.strip():
+            entry = json.loads(line)
+            out[entry["question"]] = [str(j) for j in entry["job_ids"]]
+    return out
+
+
 def rows_in(cell: Path) -> list[dict]:
     out = []
     for path in sorted((cell / "stats").glob("finished_requests_engine*.jsonl")):
@@ -311,7 +345,7 @@ def main() -> int:
     first = workflow.run(config, arm, cell, question_id=f"batch{len(plan)}",
                          count=len(plan), trace_mode="pinned",
                          completed_log=log)
-    done_first = sorted(int(x) for x in log.read_text().split()) if log.exists() else []
+    done_first = read_done(log)
     rows_first = rows_in(cell)
     print(f"   exit={first.exit_code} drained={first.drained} "
           f"questions done={done_first} rows={len(rows_first)}")
@@ -328,11 +362,13 @@ def main() -> int:
     by_job = {}
     for row in rows_first:
         by_job[row["job_id"]] = by_job.get(row["job_id"], 0) + 1
+    assigned = read_job_ids(log)
     for index in done_first:
-        job_id, expected = plan[index - 1]
-        assert by_job.get(job_id) == expected, (
-            f"question {index} was recorded done with {by_job.get(job_id)} of "
-            f"{expected} requests")
+        _, expected = plan[index - 1]
+        got = sum(by_job.get(j, 0) for j in assigned[index])
+        assert got == expected, (
+            f"question {index} was recorded done with {got} of {expected} "
+            f"requests")
     print("   every recorded question wrote all of its requests")
 
     # A drained cell is not a finished one.
@@ -350,7 +386,7 @@ def main() -> int:
     second = workflow.run(config, arm, cell, question_id=f"batch{len(plan)}",
                           count=len(plan), trace_mode="pinned",
                           completed_log=log)
-    done_second = sorted(int(x) for x in log.read_text().split())
+    done_second = read_done(log)
     rows_second = rows_in(cell)
     print(f"   exit={second.exit_code} drained={second.drained} "
           f"questions done={done_second} rows={len(rows_second)}")
@@ -397,9 +433,26 @@ def main() -> int:
     counts: dict[str, int] = {}
     for row in collected.per_request:
         counts[row["job_id"]] = counts.get(row["job_id"], 0) + 1
-    short = {job: (counts.get(job, 0), expected)
-             for job, expected in plan if counts.get(job, 0) != expected}
+    assigned = read_job_ids(log)
+    short = {}
+    for index, (_, expected) in enumerate(plan, 1):
+        got = sum(counts.get(j, 0) for j in assigned[index])
+        if got != expected:
+            short[index] = (got, expected)
     assert not short, f"questions with the wrong number of requests: {short}"
+
+    # Every question must own its own ids. A resumed process that restarts the
+    # counter relabels its questions with ids the first attempt already used,
+    # and two different questions are then grouped as one -- with the row
+    # totals still perfectly correct, which is what makes it worth asserting.
+    seen: dict[str, int] = {}
+    for index, question_ids in assigned.items():
+        for job_id in question_ids:
+            assert job_id not in seen, (
+                f"job id {job_id} used by questions {seen[job_id]} and {index}")
+            seen[job_id] = index
+    assert len(set(counts)) == len(plan), (
+        f"{len(set(counts))} distinct job ids for {len(plan)} questions")
     print(f"   {len(ids)} rows, no duplicates, every question complete")
 
     # What `run_cell` writes, and what `completed()` requires alongside the
