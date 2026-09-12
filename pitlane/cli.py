@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shlex
 import sys
 from pathlib import Path
 
@@ -83,6 +84,34 @@ def cmd_record(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _resume_command(args: argparse.Namespace, config: Config) -> str:
+    """The exact command that continues this run, ready to paste.
+
+    Rebuilt from the arguments this invocation was given rather than from
+    `sys.argv`, so it carries the defaults that were resolved here -- the run
+    id above all, which is a fresh timestamp on every invocation and is the one
+    thing a retyped command silently gets wrong.
+    """
+    parts = ["pitlane", "run"]
+    if args.env:
+        parts += [token for path in args.env for token in ("--env", str(path))]
+    parts += ["--arms", ",".join(
+        args.arms.split(",") if args.arms else arms_mod.load().measurement_arms)]
+    parts += ["--questions", args.questions]
+    if args.count is not None:
+        parts += ["--count", str(args.count)]
+    if args.reps != 1:
+        parts += ["--reps", str(args.reps)]
+    if args.trace:
+        parts += ["--trace", str(args.trace)]
+    if args.skip_preflight:
+        parts.append("--skip-preflight")
+    if args.keep_stack:
+        parts.append("--keep-stack")
+    parts += ["--run-id", config.run_id, "--resume"]
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def _latest_run_id(config: Config) -> str | None:
     """The most recently started run directory under the bench root.
 
@@ -125,13 +154,24 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(check, file=sys.stderr)
             return 1
 
-    with _teardown_on_exit(config, args.keep_stack):
-        results = runner.run_matrix(
-            config, registry,
-            arms=arm_names, questions=questions, reps=args.reps, count=args.count,
-            dry_run=args.dry_run, keep_stack=args.keep_stack,
-            resume=getattr(args, "resume", False),
-        )
+    try:
+        with _teardown_on_exit(config, args.keep_stack):
+            results = runner.run_matrix(
+                config, registry,
+                arms=arm_names, questions=questions, reps=args.reps,
+                count=args.count, dry_run=args.dry_run,
+                keep_stack=args.keep_stack,
+                resume=getattr(args, "resume", False),
+            )
+    except KeyboardInterrupt:
+        # The run id is generated per invocation, so the obvious next command
+        # -- the same one again -- starts a new run and repeats every cell
+        # already on disk. Printed rather than described because it has to
+        # carry this run's id, and by the time anyone looks for it the scroll
+        # is full of teardown.
+        print(f"\nresume this run with:\n\n  {_resume_command(args, config)}\n",
+              file=sys.stderr)
+        return 130
     path = report.write_summary(config.run_dir)
     print(f"\n{len(results)} cell(s) -> {config.run_dir}")
     print(path.read_text())
