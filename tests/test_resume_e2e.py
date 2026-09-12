@@ -295,6 +295,82 @@ def rows_in(cell: Path) -> list[dict]:
     return out
 
 
+def check_hard_kill(root: Path, latency: float) -> None:
+    """A question killed outright is re-run, not double-counted.
+
+    The second Ctrl-C, an OOM abort and a machine that goes away all land here:
+    the question in flight is lost with its rows already on disk. It is not
+    recorded as finished, so the next attempt redoes it -- and without pruning
+    the cell keeps both halves, inflating that one question's requests, tokens
+    and latencies while the totals look plausible.
+    """
+    import subprocess
+
+    repo = root / "hardkill" / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "run_evaluate.py").write_text(STUB)
+    plan = [("1", 6), ("2", 6), ("3", 6)]
+    plan_path = root / "hardkill" / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    config = StubConfig(repo, root / "no-trace")
+    arm = make_arm(repo / "tests" / "run_evaluate.py", plan_path, latency)
+    arm = type(arm)(**{**arm.__dict__,
+                       "workflow_args": arm.workflow_args + ["--concurrency", "1"]})
+    cell = root / "hardkill" / "cell"
+    log = root / "hardkill" / "questions.log"
+
+    def kill_during(question: int) -> threading.Thread:
+        needle = f"stub: question {question} started"
+
+        def fire() -> None:
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                try:
+                    if needle in (cell / "workflow.log").read_text():
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.02)
+            time.sleep(latency * 2)     # partway through, rows already written
+            subprocess.run(["pkill", "-KILL", "-f",
+                            "run_evaluate.py --max-queries 3"],
+                           capture_output=True)
+
+        thread = threading.Thread(target=fire, daemon=True)
+        thread.start()
+        return thread
+
+    kill_during(2)
+    first = workflow.run(config, arm, cell, question_id="b3", count=3,
+                         trace_mode="pinned", completed_log=log)
+    on_disk = len(rows_in(cell))
+    done = read_done(log)
+    print(f"\n== hard kill: exit={first.exit_code} done={done} "
+          f"rows left on disk={on_disk}")
+    assert first.exit_code != 0, "the stub was not actually killed"
+    assert on_disk > sum(c for _, c in plan[:len(done)]), (
+        "no partial rows were left behind, so this run does not exercise the "
+        "case -- raise the latency")
+
+    workflow.run(config, arm, cell, question_id="b3", count=3,
+                 trace_mode="pinned", completed_log=log)
+    collected = metrics_mod.collect(cell, arm="stub", question_id="b3",
+                                    t0=0, t1=1e12)
+    counts: dict[str, int] = {}
+    for row in collected.per_request:
+        counts[row["job_id"]] = counts.get(row["job_id"], 0) + 1
+    ids = [row["request_id"] for row in collected.per_request]
+    assert not {i for i in ids if ids.count(i) > 1}, "duplicate rows survived"
+    assert collected.requests == sum(c for _, c in plan), (
+        f"{collected.requests} rows, expected {sum(c for _, c in plan)}: the "
+        f"killed question was counted twice")
+    assert sorted(counts.values()) == [6, 6, 6], counts
+    print(f"   after resume: {collected.requests} rows, per question "
+          f"{sorted(counts.values())}, no duplicates")
+    print("\nall hard-kill assertions passed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -478,6 +554,8 @@ def main() -> int:
         p.name for p in cell.iterdir())
 
     print("\nall resume assertions passed")
+
+    check_hard_kill(root, max(args.latency, 0.1))
     if args.keep:
         print(f"scratch: {root}")
     else:

@@ -7,6 +7,7 @@ flags differently, and that is the whole of the difference: one counts
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -42,6 +43,97 @@ class Adapter:
 
 ODR = Adapter("odr", "--max-queries", "--completions-per-query", None)
 SWE = Adapter("swe-agent", "--max-instances", "--completions-per-instance", "--instance-ids")
+
+
+def _finished_job_ids(completed_log: Path) -> tuple[set[str], bool]:
+    """`(job ids of questions that finished, whether ids were recorded)`.
+
+    The second half matters: a log written before ids were recorded, or one
+    whose lines are bare indices, cannot say which rows belong to which
+    question -- and pruning on a set that is empty for the wrong reason would
+    delete a completed question's work.
+    """
+    if not completed_log.exists():
+        return set(), True          # nothing finished, and that is certain
+    ids: set[str] = set()
+    complete = True
+    try:
+        for line in completed_log.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.isdigit():
+                complete = False    # the old format: an index with no ids
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue            # a torn final line
+            recorded = entry.get("job_ids")
+            if not recorded:
+                complete = False
+            ids.update(str(job_id) for job_id in recorded or [])
+    except OSError:
+        return set(), False
+    return ids, complete
+
+
+def _drop_unfinished_rows(cell: Path, completed_log: Path) -> None:
+    """Remove stats rows belonging to questions that never finished.
+
+    A question killed mid-flight -- the second Ctrl-C, an OOM abort, a machine
+    that went away -- leaves the rows it had written so far. It is not recorded
+    as done, so the next attempt runs it again from the start, and the cell
+    ends up holding both: one question's work counted one and a half times,
+    with its requests, tokens and latencies all inflated and its chart showing
+    the same node twice.
+
+    So the rows of any question not recorded as finished are dropped before the
+    attempt that will redo it. Only ever rows: what a completed question wrote
+    is exactly what the log vouches for.
+
+    Nothing is dropped if the log cannot say which ids belong to finished
+    questions, since then an empty set means "unknown" rather than "none".
+    """
+    stats = cell / "stats"
+    if not stats.is_dir():
+        return
+    files = sorted(stats.glob("finished_requests_engine*.jsonl"))
+    if not files:
+        return
+    keep_ids, complete = _finished_job_ids(completed_log)
+    if not complete:
+        logger.warning(
+            "the completed-questions log records no job ids, so rows from an "
+            "unfinished question cannot be identified; a re-run question may "
+            "be counted twice"
+        )
+        return
+
+    dropped = 0
+    for path in files:
+        rows, out = [], []
+        for line in path.read_text(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rows.append(row)
+            if str(row.get("job_id") or "") in keep_ids:
+                out.append(line)
+        if len(out) != len(rows):
+            dropped += len(rows) - len(out)
+            if out:
+                path.write_text("\n".join(out) + "\n")
+            else:
+                # An attempt that finished no question at all leaves a file of
+                # nothing but discarded rows.
+                path.unlink()
+    if dropped:
+        logger.info("resume: dropped %d row(s) from questions that did not "
+                    "finish; they will be run again", dropped)
 
 
 def _accepts_completed_log(repo: Path, script: str) -> bool:
@@ -205,6 +297,7 @@ def run(
     # advertises the flag, so an older checkout still runs.
     if completed_log is not None and _accepts_completed_log(repo, arm.workflow_script):
         command += ["--completed-log", str(completed_log)]
+        _drop_unfinished_rows(cell, completed_log)
     log_path = cell / "workflow.log"
     (cell / "command.txt").write_text(" ".join(shlex.quote(c) for c in command) + "\n")
 
