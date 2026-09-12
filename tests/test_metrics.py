@@ -609,6 +609,58 @@ def check_routing_from_log(tmp: Path) -> None:
     print("\nall routing assertions passed")
 
 
+def check_resume(tmp: Path) -> None:
+    """A resumed run skips what finished and re-runs the rest, once.
+
+    The marker has to mean the cell reached the end. A cell killed mid-flight
+    has artifacts that look complete and numbers that are half a run, and it is
+    the case a resume most has to catch -- so absence of the marker, not
+    presence of the outputs, is what decides.
+    """
+    import csv as _csv
+    from pitlane import report, runner
+
+    run = tmp / "resume" / "run1"
+
+    def cell(arm, exit_code=None):
+        c = run / arm / "batch2" / "rep1"
+        c.mkdir(parents=True, exist_ok=True)
+        (c / "metrics.json").write_text(json.dumps(
+            {"arm": arm, "question_id": "batch2", "rep": 1, "requests": 43,
+             "a_column_from_a_later_version": 1}))
+        if exit_code is not None:
+            (c / "cell_status.json").write_text(json.dumps(
+                {"exit_code": exit_code, "aborted": False, "finished_at": 1.0}))
+        return c
+
+    assert runner.completed(cell("baseline", exit_code=0)) is True
+    assert runner.completed(cell("continuum", exit_code=1)) is False
+    assert runner.completed(cell("ours")) is False          # killed mid-flight
+
+    results = run / "results.csv"
+    with results.open("w", newline="") as handle:
+        writer = _csv.DictWriter(
+            handle, fieldnames=["arm", "question_id", "rep", "requests"])
+        writer.writeheader()
+        for arm in ("baseline", "continuum", "ours"):
+            writer.writerow({"arm": arm, "question_id": "batch2", "rep": 1,
+                             "requests": 43})
+
+    assert report.drop_cell_rows(results, "continuum", "batch2", 1) == 1
+    assert [r["arm"] for r in report.load_rows(results)] == ["baseline", "ours"]
+    # Idempotent: a resume of a resume must not keep rewriting the file.
+    assert report.drop_cell_rows(results, "continuum", "batch2", 1) == 0
+
+    # A stored metrics.json is rebuilt even when it carries a column this
+    # version does not know, which would otherwise re-run a finished cell.
+    stored = json.loads((run / "baseline" / "batch2" / "rep1" / "metrics.json").read_text())
+    restored = metrics.Metrics(**{k: v for k, v in stored.items()
+                                  if k in runner._METRIC_FIELDS})
+    assert restored.arm == "baseline" and restored.requests == 43
+    print("resume: 1 skipped, 2 re-run, stale rows dropped once")
+    print("\nall resume assertions passed")
+
+
 def check_run_timeline(tmp: Path) -> None:
     """Combined charts: every arm, split per question, each arm rebased.
 
@@ -759,4 +811,5 @@ if __name__ == "__main__":
         check_unsplit_cached_tokens(Path(tmp))
         check_truncated_stats(Path(tmp))
         check_routing_from_log(Path(tmp))
+        check_resume(Path(tmp))
         check_run_timeline(Path(tmp))

@@ -83,8 +83,34 @@ def cmd_record(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _latest_run_id(config: Config) -> str | None:
+    """The most recently started run directory under the bench root.
+
+    By mtime of the directory rather than by name: a run id is a timestamp by
+    default but can be anything, and `--resume` should continue what was last
+    worked on rather than what sorts last.
+    """
+    root = config.paths.bench_root
+    if not root.is_dir():
+        return None
+    runs = [d for d in root.iterdir() if d.is_dir()]
+    if not runs:
+        return None
+    return max(runs, key=lambda d: d.stat().st_mtime).name
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load_config(args)
+    if getattr(args, "resume", False) and not args.run_id:
+        # A fresh id would make a new directory and resume nothing, which looks
+        # identical to a run that simply had nothing to skip.
+        latest = _latest_run_id(config)
+        if latest is None:
+            print(f"--resume: no run directories under {config.paths.bench_root}",
+                  file=sys.stderr)
+            return 1
+        config.run_id = latest
+        print(f"resuming {config.run_dir}")
     registry = arms_mod.load()
     arm_names = args.arms.split(",") if args.arms else registry.measurement_arms
     for name in arm_names:
@@ -104,6 +130,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             config, registry,
             arms=arm_names, questions=questions, reps=args.reps, count=args.count,
             dry_run=args.dry_run, keep_stack=args.keep_stack,
+            resume=getattr(args, "resume", False),
         )
     path = report.write_summary(config.run_dir)
     print(f"\n{len(results)} cell(s) -> {config.run_dir}")
@@ -206,6 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skip-preflight", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--run-id")
+    run.add_argument(
+        "--resume", action="store_true",
+        help="continue a run: skip cells that finished, re-run the rest. "
+             "Without --run-id, continues the most recent run directory.",
+    )
     run.set_defaults(func=cmd_run)
 
     col = sub.add_parser("collect", help="recompute metrics.json for one cell")

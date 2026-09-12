@@ -44,6 +44,36 @@ def append_row(results_csv: Path, metrics: Metrics) -> None:
         writer.writerow(row)
 
 
+def drop_cell_rows(path: Path, arm: str, question_id: str, rep: int) -> int:
+    """Remove one cell's rows from a run-level CSV, returning how many went.
+
+    A resumed run re-runs the cells that did not finish, and every one of these
+    files is appended to per cell. Without this a retried cell leaves its first
+    attempt's row in place beside the second's, and every reader -- the
+    summary, the per-question regroup, the timeline -- silently averages a cell
+    with itself, weighting the arm that happened to fail.
+    """
+    if not path.exists():
+        return 0
+    rows = load_rows(path)
+    if not rows:
+        return 0
+    keep = [
+        row for row in rows
+        if not (row.get("arm") == arm
+                and row.get("question_id") == question_id
+                and str(row.get("rep")) == str(rep))
+    ]
+    dropped = len(rows) - len(keep)
+    if not dropped:
+        return 0
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(keep)
+    return dropped
+
+
 def load_rows(results_csv: Path) -> list[dict[str, str]]:
     if not results_csv.exists():
         return []

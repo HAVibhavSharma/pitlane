@@ -6,6 +6,12 @@
 #   ./launch-batch.sh 30
 #   ARMS="baseline ours" ./launch-batch.sh 10
 #   RECORD=1 ./launch-batch.sh 10        # record the trace first
+#   RESUME=1 RUN_ID=batch10_20260912_015426 ./launch-batch.sh 10
+#
+# RESUME=1 continues a run instead of starting one: cells that finished are
+# skipped and the rest are re-run, so an eight-minute boot is not paid again
+# for work already on disk. Pass the RUN_ID of the run being continued -- the
+# default id is a fresh timestamp, which would start a new one.
 #
 # The one thing this exists for is RUN_ID. `pitlane run` stamps a fresh run id
 # from the clock on every invocation, so three separate calls write three
@@ -27,6 +33,7 @@ cd "$(dirname "$0")"
 N="${1:-10}"
 ARMS="${ARMS:-baseline continuum ours}"
 RECORD="${RECORD:-0}"
+RESUME="${RESUME:-0}"
 RUN_ID="${RUN_ID:-batch${N}_$(date +%Y%m%d_%H%M%S)}"
 
 # TRACE_DIR and BENCH_ROOT live in .env, which is shell-syntax and is what
@@ -41,7 +48,13 @@ fi
 # replayed at the N it was recorded at.
 TRACE="${TRACE:-${ODR_TRACE_PATH:-${TRACE_DIR:?set TRACE_DIR or ODR_TRACE_PATH in .env, or pass TRACE=}/odr_n${N}.jsonl}}"
 
-echo "run id : $RUN_ID"
+if [ "$RESUME" = "1" ]; then
+  RESUME_FLAG="--resume"
+else
+  RESUME_FLAG=""
+fi
+
+echo "run id : $RUN_ID${RESUME_FLAG:+ (resuming)}"
 echo "arms   : $ARMS"
 echo "trace  : $TRACE"
 echo
@@ -77,7 +90,8 @@ for arm in $ARMS; do
     --count "$N" \
     --reps 1 \
     --trace "$TRACE" \
-    --run-id "$RUN_ID" || { echo "arm $arm exited non-zero" >&2; status=1; }
+    --run-id "$RUN_ID" $RESUME_FLAG \
+    || { echo "arm $arm exited non-zero" >&2; status=1; }
 done
 
 # Required rather than defaulted: this path has to be the one pitlane itself

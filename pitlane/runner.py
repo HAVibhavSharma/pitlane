@@ -7,10 +7,11 @@ collected before anything is killed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from pitlane import metrics as metrics_mod
@@ -19,6 +20,10 @@ from pitlane.arms import Arm, Registry
 from pitlane.config import Config
 
 logger = logging.getLogger(__name__)
+
+# Metrics grows columns; a stored file may predate some of them, and an
+# unknown key would make the whole resume fall back to re-running.
+_METRIC_FIELDS = {f.name for f in fields(metrics_mod.Metrics)}
 
 
 @dataclass
@@ -114,7 +119,72 @@ def run_cell(
 
     for warning in collected.warnings:
         logger.warning("%s/%s: %s", arm.name, question_id, warning)
+    # Last, and only on the way out: the marker a resume trusts has to mean the
+    # cell got all the way here. Written after the artifacts it vouches for.
+    _write_status(cell, exit_code=result.exit_code, aborted=result.aborted)
     return CellResult(arm.name, question_id, rep, cell, collected, result.exit_code)
+
+
+_STATUS = "cell_status.json"
+
+
+def _write_status(cell: Path, *, exit_code: int, aborted: bool) -> None:
+    (cell / _STATUS).write_text(json.dumps({
+        "exit_code": exit_code,
+        "aborted": aborted,
+        "finished_at": time.time(),
+    }, indent=2) + "\n")
+
+
+def completed(cell: Path) -> bool:
+    """Whether this cell finished cleanly enough to skip on a resume.
+
+    Deliberately strict. A cell is worth keeping only if the workflow exited 0,
+    it was not aborted on resources, and the collection it produced is still on
+    disk -- anything else is re-run, because an eight-minute boot is cheaper
+    than a number nobody can account for.
+
+    A cell that is *mid-flight* when the run dies has no status file at all,
+    which is the case this exists to catch: its artifacts look complete and its
+    numbers are half a run.
+    """
+    status = cell / _STATUS
+    if not status.exists() or not (cell / "metrics.json").exists():
+        return False
+    try:
+        body = json.loads(status.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return body.get("exit_code") == 0 and not body.get("aborted")
+
+
+def _resumed(config: Config, arm: Arm, question_id: str, rep: int,
+             cell: Path) -> CellResult | None:
+    """The stored result for a finished cell, or None if it must be re-run.
+
+    A cell that has to be re-run first has its earlier rows removed from the
+    run-level CSVs. They were appended by the attempt that failed, and every
+    reader downstream would otherwise count the cell twice.
+    """
+    if completed(cell):
+        try:
+            stored = metrics_mod.Metrics(**{
+                key: value
+                for key, value in json.loads((cell / "metrics.json").read_text()).items()
+                if key in _METRIC_FIELDS
+            })
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        logger.info("=== %s / %s / rep%s -- done, skipping",
+                    arm.name, question_id, rep)
+        return CellResult(arm.name, question_id, rep, cell, stored, 0)
+
+    for name in ("results.csv", "requests.csv", "prefetches.csv", "tools.csv"):
+        dropped = report.drop_cell_rows(
+            config.run_dir / name, arm.name, question_id, rep)
+        if dropped:
+            logger.info("resume: dropped %d stale row(s) from %s", dropped, name)
+    return None
 
 
 _BATCH_ID = re.compile(r"^batch(\d+)$")
@@ -165,6 +235,7 @@ def run_matrix(
     count: int | None = None,
     dry_run: bool = False,
     keep_stack: bool = False,
+    resume: bool = False,
 ) -> list[CellResult]:
     """Interleave arms within a question: A, B, C, A, B, C, ...
 
@@ -176,6 +247,13 @@ def run_matrix(
         cell_count = question_count(question, count)
         for rep in range(1, reps + 1):
             for arm_name in arms:
+                arm = registry[arm_name]
+                if resume:
+                    cell = config.cell_dir(arm.name, question, rep)
+                    done = _resumed(config, arm, question, rep, cell)
+                    if done is not None:
+                        results.append(done)
+                        continue
                 started = time.time()
                 results.append(
                     run_cell(
