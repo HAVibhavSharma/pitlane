@@ -35,6 +35,9 @@ class CellResult:
     cell: Path
     metrics: metrics_mod.Metrics
     exit_code: int
+    # Stopped at a question boundary on an interrupt: complete as far as it
+    # got, and not a cell a resume should skip.
+    drained: bool = False
 
 
 def run_cell(
@@ -100,6 +103,11 @@ def run_cell(
         )
     if result.exit_code != 0:
         collected.warnings.append(f"workflow exited {result.exit_code}")
+    if result.drained:
+        collected.warnings.append(
+            "stopped on interrupt after finishing the question in flight; "
+            "the remaining questions of this cell have not run"
+        )
     if arm.name == "ours" and collected.total_prefetches == 0:
         collected.warnings.append(
             "zero prefetches: registry likely unseeded (only /v1/agents/* registers prefixes)"
@@ -124,9 +132,14 @@ def run_cell(
         logger.warning("%s/%s: %s", arm.name, question_id, warning)
     # Last, and only on the way out: the entry a resume trusts has to mean the
     # cell got all the way here. Written after the artifacts it vouches for.
+    # A drained cell exits cleanly and is still unfinished: it answered some of
+    # its questions and stopped. Recorded as not-complete so a resume comes
+    # back to it, which the per-question log then makes cheap.
     _record_cell(config.run_dir, arm.name, question_id, rep,
-                 exit_code=result.exit_code, aborted=result.aborted)
-    return CellResult(arm.name, question_id, rep, cell, collected, result.exit_code)
+                 exit_code=result.exit_code, aborted=result.aborted,
+                 drained=result.drained)
+    return CellResult(arm.name, question_id, rep, cell, collected,
+                      result.exit_code, drained=result.drained)
 
 
 # The resume ledger. One hidden file at the top of the run, not a marker in
@@ -162,7 +175,7 @@ def _read_ledger(run_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _record_cell(run_dir: Path, arm: str, question_id: str, rep: int,
-                 *, exit_code: int, aborted: bool) -> None:
+                 *, exit_code: int, aborted: bool, drained: bool = False) -> None:
     """Note that this cell reached the end, atomically.
 
     Written through a temporary file and renamed, because the thing this
@@ -173,6 +186,7 @@ def _record_cell(run_dir: Path, arm: str, question_id: str, rep: int,
     cells[_cell_key(arm, question_id, rep)] = {
         "exit_code": exit_code,
         "aborted": aborted,
+        "drained": drained,
         "finished_at": time.time(),
     }
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -197,7 +211,9 @@ def completed(run_dir: Path, arm: str, question_id: str, rep: int,
     entry = _read_ledger(run_dir).get(_cell_key(arm, question_id, rep))
     if entry is None or not (cell / "metrics.json").exists():
         return False
-    return entry.get("exit_code") == 0 and not entry.get("aborted")
+    return (entry.get("exit_code") == 0
+            and not entry.get("aborted")
+            and not entry.get("drained"))
 
 
 def _resumed(config: Config, arm: Arm, question_id: str, rep: int,
@@ -285,6 +301,7 @@ def run_matrix(
     ran last, which is exactly the bias the study is trying to avoid.
     """
     results: list[CellResult] = []
+    planned = len(questions) * reps * len(arms)
     for question in questions:
         cell_count = question_count(question, count)
         for rep in range(1, reps + 1):
@@ -319,4 +336,11 @@ def run_matrix(
                     )
                 )
                 logger.info("cell took %.0fs", time.time() - started)
+                if results[-1].drained:
+                    logger.warning(
+                        "stopped after %d of %d cell(s); the question in "
+                        "flight finished and was recorded",
+                        len(results), planned,
+                    )
+                    return results
     return results

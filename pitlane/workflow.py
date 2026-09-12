@@ -82,6 +82,10 @@ class WorkflowResult:
     finished_ts: float
     log_path: Path
     aborted: bool = False
+    # The workflow was asked to stop at a question boundary and did. The cell
+    # is intact but incomplete: the questions it answered are recorded, the
+    # rest are not, and a resume picks up from there.
+    drained: bool = False
 
 
 def run(
@@ -230,6 +234,7 @@ def run(
         config.paths.workflow_venv, {**dict(_os_environ()), **env}
     )
     was_aborted = False
+    draining = False
     # Appended for the same reason as the server log: a resumed cell is one
     # cell, and the questions the first attempt answered are part of it.
     with log_path.open("a") as log:
@@ -247,6 +252,25 @@ def run(
                 break
             except subprocess.TimeoutExpired:
                 pass
+            except KeyboardInterrupt:
+                # The child has its own session, so a terminal's Ctrl-C reaches
+                # pitlane and not the workflow -- which is what makes a clean
+                # stop possible at all. Forwarded, so the workflow can finish
+                # the question it is on and record it; killing here would throw
+                # away a question that is minutes from done and leave the batch
+                # with work it paid for and cannot report.
+                #
+                # The second interrupt is not caught: it propagates, teardown
+                # runs, and the question in flight is lost -- which is what
+                # pressing it twice asks for.
+                if not draining:
+                    draining = True
+                    logger.warning(
+                        "interrupt: asking the workflow to finish the question "
+                        "in flight and stop. Ctrl-C again to kill it now."
+                    )
+                    _signal_group(process, signal.SIGINT)
+                continue
             if abort is not None and abort.is_set() and not was_aborted:
                 was_aborted = True
                 logger.error("resource abort; terminating the workflow")
@@ -260,7 +284,21 @@ def run(
                 process.returncode, finished - launched)
     return WorkflowResult(
         process.returncode, started, finished, log_path, aborted=was_aborted,
+        drained=draining,
     )
+
+
+def _signal_group(process: "subprocess.Popen", signum: int) -> None:
+    """Send one signal to the workflow's whole process group.
+
+    The group, not the process: ODR runs its researchers as children, and a
+    signal to the parent alone would leave them working against a server that
+    is about to go away.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signum)
+    except (ProcessLookupError, PermissionError) as exc:
+        logger.warning("could not signal the workflow: %s", exc)
 
 
 def _terminate(process: "subprocess.Popen", grace_s: float = 20.0) -> None:
