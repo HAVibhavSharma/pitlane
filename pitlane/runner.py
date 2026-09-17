@@ -95,7 +95,6 @@ def run_cell(
     collected = metrics_mod.collect(
         cell, arm=arm.name, question_id=question_id, rep=rep,
         t0=result.started_ts, t1=result.finished_ts, cache_state=cache_state,
-        host_share=config.host_share,
         lead_min_s=config.prefetch_lead_min_s,
     )
     if result.aborted:

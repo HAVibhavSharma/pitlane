@@ -75,18 +75,8 @@ pitlane --env-extra "$STACK_B" preflight --arm "$ARM_B"
 log_dir="${BENCH_ROOT:?set BENCH_ROOT in .env}/$RUN_ID/.pitlane"
 mkdir -p "$log_dir"
 
-# host_share is decided here rather than in a file anyone has to remember to
-# edit: this script is the only thing that knows whether a cell had a
-# neighbour. Written as an overlay and passed last, so it wins over whatever
-# the box's .env says.
-share_overlay() {  # share_overlay <solo|shared|mixed> -> path
-  local path="$log_dir/host-share-$1.env"
-  printf 'export BENCH_HOST_SHARE=%s\n' "$1" > "$path"
-  printf '%s' "$path"
-}
-
-run_arm() {  # run_arm <arm> <stack env> <log name> <share label>
-  pitlane --env-extra "$2" --env-extra "$(share_overlay "$4")" run \
+run_arm() {  # run_arm <arm> <stack env> <log name>
+  pitlane --env-extra "$2" run \
     --arms "$1" \
     --questions "batch${N}" \
     --count "$N" \
@@ -97,8 +87,8 @@ run_arm() {  # run_arm <arm> <stack env> <log name> <share label>
 }
 
 echo "== $ARM_A (stack A, gpu 0) and $ARM_B (stack B, gpu 1); logs in $log_dir"
-run_arm "$ARM_A" "$STACK_A" "launch-$ARM_A" shared & pid_a=$!
-run_arm "$ARM_B" "$STACK_B" "launch-$ARM_B" shared & pid_b=$!
+run_arm "$ARM_A" "$STACK_A" "launch-$ARM_A" & pid_a=$!
+run_arm "$ARM_B" "$STACK_B" "launch-$ARM_B" & pid_b=$!
 
 # Poll rather than `wait -n`: this needs to know *which* one finished, so the
 # third arm inherits that stack's card and ports. `wait -n -p` would do it in
@@ -121,9 +111,7 @@ else
   echo "== $ARM_B done; starting $THIRD on stack B"
 fi
 
-# The third arm starts beside the survivor and ends alone, which is neither of
-# the other two labels.
-run_arm "$THIRD" "$free_env" "launch-$THIRD" mixed & pid_c=$!
+run_arm "$THIRD" "$free_env" "launch-$THIRD" & pid_c=$!
 
 wait "$other_pid" || { echo "arm $other_arm exited non-zero" >&2; status=1; }
 wait "$pid_c" || { echo "arm $THIRD exited non-zero" >&2; status=1; }

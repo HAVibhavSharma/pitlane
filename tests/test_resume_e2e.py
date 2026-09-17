@@ -223,7 +223,6 @@ class StubConfig:
         # The arm's `{port}` placeholders resolve against this, the way
         # `LANGGRAPH_VLLM_ECHO_BASE_URL` does for a real arm.
         self.port = 8000
-        self.host_share = "solo"
 
     def base_url(self, suffix: str = "") -> str:
         return f"http://127.0.0.1:8000{suffix}"

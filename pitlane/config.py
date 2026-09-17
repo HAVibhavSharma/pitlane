@@ -145,11 +145,6 @@ class Config:
     # starting its own, so the second launch would tear down the first arm's
     # server several hours into it.
     instance: str = "default"
-    # Stamped onto every cell this run measures. Provenance, not a knob: the
-    # launchers set it (launch-batch.sh solo, launch-parallel.sh shared and
-    # mixed) because they are the only thing that knows whether a second arm
-    # is on the box. A bare `pitlane run` gets "solo" -- see Metrics.
-    host_share: str = "solo"
     redis_url: str = "redis://127.0.0.1:6379/0"
     # Below this lead a phantom is counted late -- see `metrics.LEAD_MIN_S`.
     prefetch_lead_min_s: float = 0.1
@@ -239,7 +234,6 @@ class Config:
             port=port,
             lmcache_port=lmcache_port,
             instance=_or(env, "BENCH_INSTANCE", f"p{port}"),
-            host_share=_or(env, "BENCH_HOST_SHARE", "solo"),
             lmcache_l1_gb=l1_gb,
             min_free_ram_gb=float(
                 _or(env, "BENCH_MIN_FREE_RAM_GB", str(l1_gb + ram_margin_gb))
