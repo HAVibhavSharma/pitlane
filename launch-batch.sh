@@ -77,6 +77,13 @@ fi
 # them cell by cell -- right for isolated runs, wrong here, because a batch cell
 # is the whole question set and interleaving would mean three boots either way
 # with no benefit.
+# One arm at a time, so every cell this script produces had the box to itself.
+# Stated rather than assumed: `pitlane run` by hand inherits whatever the .env
+# says, and this is the one place that knows the answer for certain.
+share_overlay="${BENCH_ROOT:?set BENCH_ROOT in .env}/$RUN_ID/.pitlane/host-share-solo.env"
+mkdir -p "$(dirname "$share_overlay")"
+printf 'export BENCH_HOST_SHARE=solo\n' > "$share_overlay"
+
 status=0
 for arm in $ARMS; do
   echo
@@ -84,7 +91,7 @@ for arm in $ARMS; do
   # `|| status=1` rather than letting `set -e` abort: a failed arm should not
   # take the arms after it down with it, and the run directory is still worth
   # having for the ones that finished.
-  pitlane run \
+  pitlane --env-extra "$share_overlay" run \
     --arms "$arm" \
     --questions "batch${N}" \
     --count "$N" \
@@ -98,5 +105,5 @@ done
 # resolved, and a default here can silently disagree with the tool's -- which
 # reports on an empty directory while the real results sit somewhere else.
 echo
-pitlane report "${BENCH_ROOT:?set BENCH_ROOT in .env}/$RUN_ID"
+pitlane report "${BENCH_ROOT}/$RUN_ID"
 exit "$status"

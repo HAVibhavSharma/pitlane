@@ -31,9 +31,12 @@ So: use this for token-level results, for functional coverage, and to find
 failures early at half the wall clock. Re-run sequentially with
 `./launch-batch.sh` for any latency number you intend to publish.
 
-Every cell carries the answer in its own row: `host_share` is `solo`,
+Every cell carries the answer in its own row. `host_share` is `solo`,
 `shared` (a neighbour for the whole cell) or `mixed` (the third arm, which
-starts beside the survivor and ends alone).
+starts beside the survivor and ends alone) — and the launcher sets it, because
+the launcher is the only thing that knows. `launch-batch.sh` writes `solo`,
+this one writes `shared` and `mixed`, both as an overlay passed last so it wins
+over the box's `.env`. There is nothing to remember to change between runs.
 
 ## What makes the two stacks independent
 
