@@ -7,10 +7,13 @@ collected before anything is killed.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -92,6 +95,7 @@ def run_cell(
     collected = metrics_mod.collect(
         cell, arm=arm.name, question_id=question_id, rep=rep,
         t0=result.started_ts, t1=result.finished_ts, cache_state=cache_state,
+        host_share=config.host_share,
         lead_min_s=config.prefetch_lead_min_s,
     )
     if result.aborted:
@@ -166,6 +170,25 @@ def _cell_key(arm: str, question_id: str, rep: int) -> str:
     return f"{arm}/{question_id}/rep{rep}"
 
 
+@contextmanager
+def _ledger_lock(run_dir: Path):
+    """Serialise ledger updates across processes.
+
+    A separate lock file rather than the ledger itself: the ledger is replaced
+    by rename on every write, so a lock held on it would be a lock on a file
+    that no longer exists. flock is advisory and process-scoped, which is
+    exactly the scope of the race -- and it is released by the kernel if the
+    holder is killed, so an interrupted run cannot wedge the next one.
+    """
+    path = run_dir / f"{_LEDGER}.lock"
+    with open(path, "a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _read_ledger(run_dir: Path) -> dict[str, dict[str, Any]]:
     try:
         body = json.loads((run_dir / _LEDGER).read_text())
@@ -181,18 +204,27 @@ def _record_cell(run_dir: Path, arm: str, question_id: str, rep: int,
     Written through a temporary file and renamed, because the thing this
     records is survival of an interrupt -- a ledger torn in half by the kill it
     is meant to outlive would take every earlier cell with it.
+
+    Read-modify-write, so it is also locked: two pitlane processes sharing a
+    run id -- one arm per GPU -- both read the ledger, both add their own cell
+    and both write, and whichever renames second erases the other arm's entry.
+    The loss is quiet. Nothing fails; a later `--resume` simply re-runs a cell
+    that is already complete on disk, and re-runs it into a directory that
+    already has results in it. A fixed `.tmp` name made it worse by letting the
+    two writes tread on each other's half-written file.
     """
-    cells = _read_ledger(run_dir)
-    cells[_cell_key(arm, question_id, rep)] = {
-        "exit_code": exit_code,
-        "aborted": aborted,
-        "drained": drained,
-        "finished_at": time.time(),
-    }
     run_dir.mkdir(parents=True, exist_ok=True)
-    tmp = run_dir / f"{_LEDGER}.tmp"
-    tmp.write_text(json.dumps({"cells": cells}, indent=2) + "\n")
-    tmp.replace(run_dir / _LEDGER)
+    with _ledger_lock(run_dir):
+        cells = _read_ledger(run_dir)
+        cells[_cell_key(arm, question_id, rep)] = {
+            "exit_code": exit_code,
+            "aborted": aborted,
+            "drained": drained,
+            "finished_at": time.time(),
+        }
+        tmp = run_dir / f"{_LEDGER}.tmp.{os.getpid()}"
+        tmp.write_text(json.dumps({"cells": cells}, indent=2) + "\n")
+        tmp.replace(run_dir / _LEDGER)
 
 
 def completed(run_dir: Path, arm: str, question_id: str, rep: int,

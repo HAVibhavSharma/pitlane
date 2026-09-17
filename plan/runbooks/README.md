@@ -9,6 +9,7 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
 | [01-baseline.md](01-baseline.md) | vLLM + LMCache MP + LRU | `$VLLM_BASELINE_REPO` | `$VLLM_BASELINE_VENV` |
 | [02-continuum.md](02-continuum.md) | vLLM-Continuum | `$VLLM_CONTINUUM_REPO` | `$VLLM_CONTINUUM_VENV` |
 | [03-ours.md](03-ours.md) | vLLM + prefetch + node eviction | `$VLLM_OURS_REPO` | `$VLLM_OURS_VENV` |
+| [04-parallel.md](04-parallel.md) | two stacks at once, one per GPU | all three | all three |
 
 ## Conventions
 
@@ -40,7 +41,8 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
   flags, which fails silently.
 - **tmux sessions**, one per role, always the same names:
   `lmcache`, `vllm`, `workflow`. Start detached (`tmux new-session -d -s NAME`)
-  so an ssh drop does not kill the run.
+  so an ssh drop does not kill the run. A second concurrent stack suffixes
+  them with its `BENCH_INSTANCE` (`vllm-b`) -- see [04-parallel.md](04-parallel.md).
 - **LMCache wipe and restart are one operation**, in this order: stop → delete
   `$LMCACHE_L2_DIR` → start. Wiping under a live server leaves its in-memory
   L1 index pointing at deleted files.
@@ -51,5 +53,7 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
 - **One question per boot** is the default. Reusing a boot for several
   questions means a warm LMCache from the second question on — mark those runs
   `warm` and do not average them with cold ones.
-- **Preflight** before any of it: GPU 0 idle, host RAM free ≥ LMCache
-  `--l1-size-gb` + margin, port 8000 unbound, `/disk2` has room.
+- **Preflight** before any of it: the arm's GPU idle, host RAM free ≥ LMCache
+  `--l1-size-gb` + margin, the arm's vLLM port unbound, `/disk2` has room.
+  Two concurrent stacks preflight separately, each against its own card and
+  its own ports.

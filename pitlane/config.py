@@ -139,6 +139,15 @@ class Config:
     server_ready_timeout_s: float = 1800.0
     port: int = 8000
     lmcache_port: int = 10903
+    # Names this stack's tmux sessions and nothing else. Two pitlane processes
+    # sharing a box -- one arm per GPU -- would otherwise both own the sessions
+    # called "vllm" and "lmcache", and `start_server` kills that session before
+    # starting its own, so the second launch would tear down the first arm's
+    # server several hours into it.
+    instance: str = "default"
+    # Stamped onto every cell this run measures: "solo" unless a launcher says
+    # another arm shares the box. Provenance, not a knob -- see Metrics.
+    host_share: str = "solo"
     redis_url: str = "redis://127.0.0.1:6379/0"
     # Below this lead a phantom is counted late -- see `metrics.LEAD_MIN_S`.
     prefetch_lead_min_s: float = 0.1
@@ -212,6 +221,12 @@ class Config:
         # BENCH_MIN_FREE_RAM_GB still wins, for a box with other tenants.
         l1_gb = float(_or(env, "BENCH_LMCACHE_L1_GB", "200"))
         ram_margin_gb = float(_or(env, "BENCH_RAM_MARGIN_GB", "60"))
+        # Ports are per stack, not per box: a second concurrent arm needs its
+        # own vLLM and its own LMCache. The instance label defaults to the vLLM
+        # port so that changing the port is enough -- forgetting the label
+        # cannot silently give two stacks the same tmux session.
+        port = int(_or(env, "BENCH_PORT", "8000"))
+        lmcache_port = int(_or(env, "BENCH_LMCACHE_PORT", "10903"))
 
         return cls(
             env=env,
@@ -219,6 +234,10 @@ class Config:
             model_name=need("MODEL_NAME"),
             trace_path=Path(need("ODR_TRACE_PATH")),
             gpu=int(env.get("BENCH_GPU", "0")),
+            port=port,
+            lmcache_port=lmcache_port,
+            instance=_or(env, "BENCH_INSTANCE", f"p{port}"),
+            host_share=_or(env, "BENCH_HOST_SHARE", "solo"),
             lmcache_l1_gb=l1_gb,
             min_free_ram_gb=float(
                 _or(env, "BENCH_MIN_FREE_RAM_GB", str(l1_gb + ram_margin_gb))

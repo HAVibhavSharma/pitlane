@@ -205,7 +205,7 @@ def run(
 
     env = dict(config.env)
     env.update(arm.resolved_env("workflow", repo=repo, cell=cell,
-                                model=config.model_name))
+                                model=config.model_name, port=config.port))
     env.update({
         "ODR_TRACE_MODE": trace_mode,
         "ODR_TRACE_PATH": str(config.trace_path),

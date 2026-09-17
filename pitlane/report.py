@@ -18,7 +18,7 @@ from typing import Any
 from pitlane.metrics import Metrics
 
 _COLUMNS = [
-    "arm", "question_id", "rep", "cache_state",
+    "arm", "question_id", "rep", "cache_state", "host_share",
     "ttft_s", "kv_hit_rate", "query_tokens", "token_hits",
     "external_token_hits", "workflow_output_tokens",
     "total_prefetches", "late_prefetches", "late_prefetch_pct", "unused_prefetches",

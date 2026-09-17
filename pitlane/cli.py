@@ -36,7 +36,12 @@ DEFAULT_ENV_FILES = [
 
 
 def _load_config(args: argparse.Namespace) -> Config:
+    # `--env` replaces the defaults; `--env-extra` layers on top of whatever
+    # they resolved to. A second concurrent stack differs from the first in
+    # four lines, and spelling out the whole chain to add them is how a run
+    # ends up silently missing ~/.bench.env.
     files = [Path(p) for p in (args.env or [])] or DEFAULT_ENV_FILES
+    files += [Path(p) for p in (getattr(args, "env_extra", None) or [])]
     config = Config.load([f for f in files])
     if getattr(args, "trace", None):
         config.trace_path = Path(args.trace)
@@ -237,6 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pitlane", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env", action="append", help="env file (repeatable)")
+    parser.add_argument("--env-extra", action="append",
+                        help="env file layered over the defaults (repeatable)")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 

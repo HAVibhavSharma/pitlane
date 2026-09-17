@@ -36,15 +36,16 @@ class Arm:
     venv: str = ""
 
     def resolved_env(self, which: str, *, repo: Path, cell: Path,
-                     model: str = "") -> dict[str, str]:
+                     model: str = "", port: int = 8000) -> dict[str, str]:
         source = self.server_env if which == "server" else self.workflow_env
         return {
-            key: self.expand(value, repo=repo, cell=cell, model=model)
+            key: self.expand(value, repo=repo, cell=cell, model=model, port=port)
             for key, value in source.items()
         }
 
     @staticmethod
-    def expand(value: str, *, repo: Path, cell: Path, model: str = "") -> str:
+    def expand(value: str, *, repo: Path, cell: Path, model: str = "",
+               port: int = 8000) -> str:
         """Substitute the run-dependent placeholders.
 
         Literal replacement, not str.format: server args carry JSON
@@ -55,14 +56,19 @@ class Arm:
         being written twice. Two copies drift, and the way this one drifts is
         silent: langgraph's agent worker reports itself disabled when it cannot
         resolve a model, so the predictor stops without an error.
+
+        ``{port}`` is there for the same reason and fails the same way: an arm
+        that hard-codes 8000 points the workflow at whichever stack owns that
+        port, which on a two-GPU box is the *other* arm's server -- and the run
+        looks fine while measuring the wrong one.
         """
         for token, path in (("{repo}", repo), ("{cell}", cell), ("{plan}", _PLAN)):
             value = value.replace(token, str(path))
-        return value.replace("{model}", model)
+        return value.replace("{model}", model).replace("{port}", str(port))
 
     def resolved_server_args(self, *, repo: Path, cell: Path,
-                             model: str = "") -> list[str]:
-        return [self.expand(a, repo=repo, cell=cell, model=model)
+                             model: str = "", port: int = 8000) -> list[str]:
+        return [self.expand(a, repo=repo, cell=cell, model=model, port=port)
                 for a in self.server_args]
 
     def unset_keys(self, which: str) -> list[str]:

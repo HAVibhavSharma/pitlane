@@ -220,6 +220,10 @@ class StubConfig:
         self.model_name = "stub-model"
         self.trace_path = trace
         self.run_dir = repo / "runs"
+        # The arm's `{port}` placeholders resolve against this, the way
+        # `LANGGRAPH_VLLM_ECHO_BASE_URL` does for a real arm.
+        self.port = 8000
+        self.host_share = "solo"
 
     def base_url(self, suffix: str = "") -> str:
         return f"http://127.0.0.1:8000{suffix}"
@@ -547,9 +551,13 @@ def main() -> int:
     assert runner.completed(run_dir, "stub", f"batch{len(plan)}", 1, cell)
     print("   cell now recorded as complete")
 
-    # The bookkeeping stays out of the results.
+    # The bookkeeping stays out of the results. The lock is bookkeeping too:
+    # it exists so two arms running concurrently under one run id cannot lose
+    # each other's ledger entries, and it is hidden for the same reason the
+    # ledger is.
     assert sorted(p.name for p in run_dir.iterdir() if p.name.startswith(".")) == [
-        ".pitlane", ".pitlane-progress.json"], sorted(p.name for p in run_dir.iterdir())
+        ".pitlane", ".pitlane-progress.json", ".pitlane-progress.json.lock",
+    ], sorted(p.name for p in run_dir.iterdir())
     assert not any("status" in p.name for p in cell.iterdir()), sorted(
         p.name for p in cell.iterdir())
 

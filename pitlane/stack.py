@@ -28,8 +28,15 @@ from pitlane.config import Config
 
 logger = logging.getLogger(__name__)
 
-LMCACHE_SESSION = "lmcache"
-VLLM_SESSION = "vllm"
+# Session names are per instance, so two stacks can share a box. The bare
+# names are kept as the default instance's, so a single-stack box and every
+# runbook that says `tmux attach -t vllm` still work unchanged.
+def vllm_session(config: Config) -> str:
+    return "vllm" if config.instance == "default" else f"vllm-{config.instance}"
+
+
+def lmcache_session(config: Config) -> str:
+    return "lmcache" if config.instance == "default" else f"lmcache-{config.instance}"
 
 # Lines that mean the boot is dead; polling for readiness past one of these
 # just burns the timeout.
@@ -79,7 +86,7 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
     prompt tokens never reaches. It does mean nothing survives a restart, so
     an arm that wants a warm cache across cells needs the disk tier.
     """
-    tmux.kill(LMCACHE_SESSION)
+    tmux.kill(lmcache_session(config))
     _free_port(config.lmcache_port)
 
     l1_size_gb = config.lmcache_l1_gb if l1_size_gb is None else l1_size_gb
@@ -106,23 +113,22 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
         f" --port {config.lmcache_port}"
         f"{adapter_arg}"
     )
-    tmux.start(LMCACHE_SESSION, command, env=config_mod.venv_env(venv))
+    tmux.start(lmcache_session(config), command, env=config_mod.venv_env(venv))
     _wait_port_open(config.lmcache_port, timeout_s=120)
     logger.info("LMCache up on port %s", config.lmcache_port)
 
 
-def stop_lmcache(config: Config | None = None) -> None:
+def stop_lmcache(config: Config) -> None:
     """Kill the session and wait for the port, like `stop_server` already did.
 
     Killing the tmux session returns immediately; the process still has to run
-    down and release 10903. The next arm's preflight starts within
+    down and release its port. The next arm's preflight starts within
     milliseconds, sees the port bound and refuses to run -- so a matrix would
     complete its first arm and fail every one after it, reporting a stale
     server as the operator's fault.
     """
-    tmux.kill(LMCACHE_SESSION)
-    if config is not None:
-        _free_port(config.lmcache_port)
+    tmux.kill(lmcache_session(config))
+    _free_port(config.lmcache_port)
 
 
 # -- vLLM ------------------------------------------------------------------
@@ -135,8 +141,12 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     stats_dir.mkdir(parents=True, exist_ok=True)
 
     env = arm.resolved_env("server", repo=repo, cell=cell,
-                           model=config.model_name)
+                           model=config.model_name, port=config.port)
     env["VLLM_REQUEST_STATS_DIR"] = str(stats_dir)
+    # Without this every arm loads onto card 0 whatever BENCH_GPU says, which
+    # on a two-GPU box means the second concurrent stack lands on top of the
+    # first and both die on VRAM -- after an eight-minute boot each.
+    env["CUDA_VISIBLE_DEVICES"] = str(config.gpu)
     # Each build lives in its own virtualenv; `vllm` on PATH is whichever one
     # the shell activated, which for a multi-arm run is the wrong one twice out
     # of three times.
@@ -146,7 +156,8 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     args = " ".join(
         shlex.quote(a)
         for a in arm.resolved_server_args(repo=repo, cell=cell,
-                                        model=config.model_name)
+                                        model=config.model_name,
+                                        port=config.port)
     )
     command = (
         f"{shlex.quote(config_mod.venv_bin(venv, 'vllm'))} "
@@ -157,11 +168,11 @@ def start_server(config: Config, arm: Arm, cell: Path) -> Path:
         # that already ran, and which the collector reads as one cell.
         f"{args} >> {shlex.quote(str(log_path))} 2>&1"
     )
-    tmux.kill(VLLM_SESSION)
+    tmux.kill(vllm_session(config))
     # Reclaim rather than merely wait: a previous run killed by Ctrl-C leaves an
     # orphan that will never exit, and these ports are pitlane's own.
     _free_port(config.port, grace_s=30, kill_s=30)
-    tmux.start(VLLM_SESSION, command, cwd=str(repo), env=env)
+    tmux.start(vllm_session(config), command, cwd=str(repo), env=env)
     wait_ready(config, log_path)
     return log_path
 
@@ -174,7 +185,7 @@ def stop_server(config: Config) -> None:
     correct while something is still tearing down. An orphaned server never
     exits, and the old 300 s wait sat there watching it.
     """
-    tmux.kill(VLLM_SESSION)
+    tmux.kill(vllm_session(config))
     _free_port(config.port, grace_s=60, kill_s=30)
 
 
@@ -343,8 +354,8 @@ def down(config: Config) -> None:
     goes through the same escalation the stop paths use, which also releases
     the VRAM an orphaned EngineCore is still holding.
     """
-    tmux.kill(VLLM_SESSION)
-    tmux.kill(LMCACHE_SESSION)
+    tmux.kill(vllm_session(config))
+    tmux.kill(lmcache_session(config))
     for port, label in ((config.port, "vllm"), (config.lmcache_port, "lmcache")):
         if _port_open(port):
             logger.info("reclaiming port %d (%s)", port, label)

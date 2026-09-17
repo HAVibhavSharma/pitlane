@@ -390,6 +390,12 @@ class Metrics:
     question_id: str = ""
     rep: int = 1
     cache_state: str = "cold"
+    # "solo" | "shared" | "mixed". Whether another arm was running on the other
+    # GPU while this cell was measured. The GPUs are separate, so the token and
+    # hit-rate columns mean the same thing either way -- but every latency in
+    # the row was measured against a neighbour, and nothing else in the results
+    # would ever say so.
+    host_share: str = "solo"
 
     ttft_s: float | None = None
     ttft_source_node: str | None = None
@@ -473,9 +479,11 @@ def collect(
     t0: float | None = None,
     t1: float | None = None,
     cache_state: str = "cold",
+    host_share: str = "solo",
     lead_min_s: float = LEAD_MIN_S,
 ) -> Metrics:
     metrics = Metrics(arm=arm, question_id=question_id, rep=rep, cache_state=cache_state,
+                      host_share=host_share,
                       prefetch_lead_min_threshold_s=lead_min_s)
 
     if t0 is None:
