@@ -82,6 +82,31 @@ class Paths:
     lmcache_venv: Path | None = None
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
+
+
+def _tri_state(env: dict[str, str], key: str) -> bool | None:
+    """True / False / None, where None means "the arm decides".
+
+    A plain bool would need a default, and every default here is wrong: `False`
+    would silently disable the policy for the arm whose whole purpose is to run
+    it, `True` would enable it for baseline and continuum. Absent has to stay
+    distinguishable from set-to-0.
+    """
+    raw = env.get(key, "").strip().lower()
+    if not raw:
+        return None
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSEY:
+        return False
+    raise ConfigError(
+        f"{key}={raw!r} is neither true nor false; use 1 or 0 (or leave it "
+        f"empty to let the arm decide)"
+    )
+
+
 def _or(env: dict[str, str], key: str, default: str) -> str:
     """`env[key]` if it has a value, else `default`.
 
@@ -145,6 +170,30 @@ class Config:
     # starting its own, so the second launch would tear down the first arm's
     # server several hours into it.
     instance: str = "default"
+    # Node-aware KV eviction, overriding whatever the arm asks for: True forces
+    # the full policy on, False forces the upstream LRU free-block queue, None
+    # (the default) leaves the arm's own server_env alone. Set from
+    # BENCH_NODE_EVICTION so the on/off pair is one variable rather than an
+    # edit to arms.toml -- the server's environment is built from the arm
+    # alone, so an env-file overlay cannot otherwise reach it.
+    node_eviction: bool | None = None
+    # Agent prefix prefetch, same three states and the same scoping: True
+    # leaves it on, False turns it off, None lets the arm decide. Set from
+    # BENCH_PREFETCH. The workflow's own switch is spelled the other way round
+    # (KV_EVICTION_DISABLE_PREFETCH), which is exactly why this exists: one
+    # variable that reads the way the question is asked.
+    prefetch: bool | None = None
+    # The system prompt population phase: fill each node's prompt as far as
+    # the first runtime-only field, POST it to /v1/agents/prefetch so the
+    # server records the prefix, and (with prefill_on_miss) leave it resident
+    # before the measured phase. True runs it, False skips it, None lets the
+    # arm decide. Set from BENCH_SEED_PREFIXES.
+    seed_prefixes: bool | None = None
+    # The prompt seeds: rebuild compress_research's and
+    # final_report_generation's prompts from requests already sent and prefill
+    # them during a gap. True on, False off, None lets the arm decide. Set from
+    # BENCH_PROMPT_SEEDS.
+    prompt_seeds: bool | None = None
     redis_url: str = "redis://127.0.0.1:6379/0"
     # Below this lead a phantom is counted late -- see `metrics.LEAD_MIN_S`.
     prefetch_lead_min_s: float = 0.1
@@ -234,6 +283,10 @@ class Config:
             port=port,
             lmcache_port=lmcache_port,
             instance=_or(env, "BENCH_INSTANCE", f"p{port}"),
+            node_eviction=_tri_state(env, "BENCH_NODE_EVICTION"),
+            prefetch=_tri_state(env, "BENCH_PREFETCH"),
+            seed_prefixes=_tri_state(env, "BENCH_SEED_PREFIXES"),
+            prompt_seeds=_tri_state(env, "BENCH_PROMPT_SEEDS"),
             lmcache_l1_gb=l1_gb,
             min_free_ram_gb=float(
                 _or(env, "BENCH_MIN_FREE_RAM_GB", str(l1_gb + ram_margin_gb))

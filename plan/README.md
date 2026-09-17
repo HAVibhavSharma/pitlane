@@ -4,6 +4,7 @@
 |---|---|
 | [01-design.md](01-design.md) | The design: features, components, config keys, execution order, and the exact metric definitions with their sources |
 | [02-running.md](02-running.md) | How to start an evaluation for 1, 10 or 30 questions, on ODR or swe-agent |
+| [ABLATION-SMOKE-TEST.md](ABLATION-SMOKE-TEST.md) | One question per ablation mode, with the evidence each switch must leave — run it on the box before committing to a full batch |
 | [runbooks/](runbooks/README.md) | The commands each serving stack needs, in order — what the tool automates, and what to run by hand when debugging one arm |
 
 ## Where a question is answered

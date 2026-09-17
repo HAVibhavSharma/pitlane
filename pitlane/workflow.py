@@ -136,8 +136,11 @@ def _drop_unfinished_rows(cell: Path, completed_log: Path) -> None:
                     "finish; they will be run again", dropped)
 
 
-def _accepts_completed_log(repo: Path, script: str) -> bool:
-    """Whether this arm's script takes `--completed-log`.
+_SKIP_POPULATION_FLAG = "--skip-system-prompt-population"
+
+
+def _accepts_flag(repo: Path, script: str, flag: str) -> bool:
+    """Whether this arm's script advertises `flag`.
 
     Sniffed from the script the arm actually runs, for the same reason the
     adapter is: the repo is the thing that changed. An older checkout, or one
@@ -145,9 +148,45 @@ def _accepts_completed_log(repo: Path, script: str) -> bool:
     as before instead of dying on an unknown flag.
     """
     try:
-        return "--completed-log" in (repo / script).read_text()
+        return flag in (repo / script).read_text()
     except OSError:
         return False
+
+
+def _population_args(config: Config, arm: Arm, repo: Path) -> list[str]:
+    """BENCH_SEED_PREFIXES, as the argument it has to become.
+
+    Unlike the other two arm flags this is a CLI switch rather than an env
+    var, and it is spelled as a negative -- so "on" is the absence of an
+    argument, not the presence of one.
+
+    Scoped by what the script advertises, which is the same test that scopes
+    the other flags and is true of exactly one script: `run_evaluate.py` has
+    no population phase to skip, so baseline and continuum cannot be reached
+    by this whatever it is set to.
+    """
+    if config.seed_prefixes is None:
+        return []
+    if not _accepts_flag(repo, arm.workflow_script, _SKIP_POPULATION_FLAG):
+        logger.info(
+            "arm %s has no system prompt population phase; BENCH_SEED_PREFIXES "
+            "does not apply to it", arm.name,
+        )
+        return []
+    if config.seed_prefixes:
+        # On is the default; saying so is only worth a line in the log, and
+        # the arm cannot ask for the skip anyway without putting it in
+        # workflow_args, which this deliberately does not remove -- an arm
+        # that hard-codes the skip means it.
+        logger.info("arm %s: seeding prefixes (BENCH_SEED_PREFIXES=1)", arm.name)
+        return []
+    logger.info("arm %s: skipping the prefix seed (BENCH_SEED_PREFIXES=0)", arm.name)
+    return [_SKIP_POPULATION_FLAG]
+
+
+def _accepts_completed_log(repo: Path, script: str) -> bool:
+    """Whether this arm's script takes `--completed-log`."""
+    return _accepts_flag(repo, script, "--completed-log")
 
 
 def detect(repo: Path) -> Adapter:
@@ -206,6 +245,8 @@ def run(
     env = dict(config.env)
     env.update(arm.resolved_env("workflow", repo=repo, cell=cell,
                                 model=config.model_name, port=config.port))
+    _apply_prefetch_override(env, config, arm)
+    _apply_prompt_seeds_override(env, config, arm)
     env.update({
         "ODR_TRACE_MODE": trace_mode,
         "ODR_TRACE_PATH": str(config.trace_path),
@@ -289,6 +330,7 @@ def run(
         config_mod.venv_bin(config.paths.workflow_venv, "python"), arm.workflow_script,
         *adapter.selection_args(count, question_id),
         *arm.workflow_args,
+        *_population_args(config, arm, repo),
     ]
     # Per-question resume inside a batch cell. A 50-question cell is one
     # workflow process, so without this an interrupt at question 40 costs all
@@ -413,6 +455,72 @@ def _terminate(process: "subprocess.Popen", grace_s: float = 20.0) -> None:
         os.killpg(group, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _apply_prefetch_override(env: dict[str, str], config: Config, arm: Arm) -> None:
+    """BENCH_PREFETCH, for the arm that prefetches and no other.
+
+    Applied after the arm's own workflow_env, which is the only reason it does
+    anything: `arms.toml` pins KV_EVICTION_DISABLE_PREFETCH for `ours`, and an
+    arm always wins over `config.env`, so setting the variable in a .env file
+    has no effect at all.
+
+    Scoped by whether the arm declares that key, not by name. baseline and
+    continuum do not prefetch and must not start because a variable was set
+    for somebody else -- they are the control, and switching them is a way to
+    invalidate the comparison that leaves no trace in the results.
+
+    Only the disable flag is written. The harness turns that one switch into
+    the two the prediction path actually reads: with it set,
+    run_evaluate_node_eviction.py clears LANGGRAPH_VLLM_AGENT_ENABLE *and*
+    LANGGRAPH_VLLM_AGENT_BASE_URL, because `vllm_agent_enabled()` is true if
+    either survives.
+    """
+    if config.prefetch is None:
+        return
+    if "KV_EVICTION_DISABLE_PREFETCH" not in arm.workflow_env:
+        logger.info(
+            "arm %s does not prefetch; BENCH_PREFETCH does not apply to it",
+            arm.name,
+        )
+        return
+    # Inverted on purpose: the flag says prefetch, the variable says disable.
+    env["KV_EVICTION_DISABLE_PREFETCH"] = "0" if config.prefetch else "1"
+    logger.info(
+        "arm %s: prefetch forced %s by BENCH_PREFETCH (the arm asks for "
+        "KV_EVICTION_DISABLE_PREFETCH=%r)",
+        arm.name,
+        "on" if config.prefetch else "off",
+        arm.workflow_env["KV_EVICTION_DISABLE_PREFETCH"],
+    )
+
+
+def _apply_prompt_seeds_override(env: dict[str, str], config: Config,
+                                 arm: Arm) -> None:
+    """BENCH_PROMPT_SEEDS, for the arm that prefetches and no other.
+
+    Scoped the same way as BENCH_PREFETCH, and for the same reason: the seeds
+    are only reachable when the agent prefetch is on, so an arm that does not
+    declare KV_EVICTION_DISABLE_PREFETCH has nothing for this to switch.
+    baseline and continuum are the control.
+
+    Unlike the eviction and prefetch flags this one is not pinned by the arm,
+    so `config.env` would already reach it -- setting it here anyway keeps the
+    scoping honest: a value meant for `ours` must not leak onto an arm that
+    happens to read the same variable.
+    """
+    if config.prompt_seeds is None:
+        return
+    if "KV_EVICTION_DISABLE_PREFETCH" not in arm.workflow_env:
+        env.pop("ODR_PROMPT_SEEDS", None)
+        logger.info(
+            "arm %s does not prefetch; BENCH_PROMPT_SEEDS does not apply to it",
+            arm.name,
+        )
+        return
+    env["ODR_PROMPT_SEEDS"] = "1" if config.prompt_seeds else "0"
+    logger.info("arm %s: prompt seeds %s by BENCH_PROMPT_SEEDS", arm.name,
+                "on" if config.prompt_seeds else "off")
 
 
 def _os_environ() -> dict[str, str]:

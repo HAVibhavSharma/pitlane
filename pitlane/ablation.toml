@@ -1,0 +1,79 @@
+# Ablation modes for the `ours` arm.
+#
+# Each mode becomes an arm named `ours_<mode>`, derived from `[ours]` in
+# arms.toml with these four switches applied over its env. They are arms and
+# not a runtime flag for one reason: a cell is keyed by (arm, question, rep),
+# so two modes under one arm name would write to the same directory and
+# `summary.md` would have nothing to pivot. As separate arms they share a run
+# id and land side by side:
+#
+#   ARMS="ours_full ours_no_seeds ours_no_pseudo" ./launch-batch.sh 50
+#
+# The four switches, and what they reach:
+#
+#   node_eviction   VLLM_NODE_EVICTION_POLICY   vLLM server; the free-block
+#                   queue is upstream LRU when off
+#   prefetch        KV_EVICTION_DISABLE_PREFETCH (inverted)  langgraph's live
+#                   predictor -- and the master switch: with it off the
+#                   workflow clears LANGGRAPH_VLLM_AGENT_ENABLE and
+#                   ..._BASE_URL, which turns the two below off with it
+#   prompt_seeds    ODR_PROMPT_SEEDS            the compress and final-report
+#                   prompt seeds
+#   pseudo_dynamic  LANGGRAPH_PROMPT_PSEUDO_DYNAMIC   whether a manufactured
+#                   segment (date, mcp_prompt, a bare {placeholder}) may be
+#                   filled when building a prefix, or blocks it
+#
+# Omitting a switch leaves whatever the arm and the environment already say.
+# `prompt_seeds` and `pseudo_dynamic` are only meaningful while `prefetch` is
+# true; a mode that sets them with prefetch off is rejected at load, because
+# the run would silently be the same as `no_prefetch` under a different name.
+#
+# The system prompt population phase is not a switch here. Since the registry
+# is written only by /v1/agent_chat and /v1/agents/*, skipping it leaves every
+# lookup empty and every prefetch a silent no-op -- an invalid run, not an
+# ablation.
+
+[full]
+description = "everything on: eviction, predictor, prompt seeds, filled prefixes"
+node_eviction = true
+prefetch = true
+prompt_seeds = true
+pseudo_dynamic = true
+
+[no_seeds]
+description = "full, minus the compress and final-report prompt seeds"
+node_eviction = true
+prefetch = true
+prompt_seeds = false
+pseudo_dynamic = true
+
+[no_pseudo]
+description = "full, but a prefix blocks at its first manufactured segment"
+node_eviction = true
+prefetch = true
+prompt_seeds = true
+pseudo_dynamic = false
+
+[predictor_only]
+description = "the live predictor alone: no prompt seeds, prefixes block early"
+node_eviction = true
+prefetch = true
+prompt_seeds = false
+pseudo_dynamic = false
+
+[no_prefetch]
+description = "node eviction alone, nothing warmed ahead of a request"
+node_eviction = true
+prefetch = false
+
+[no_eviction]
+description = "everything warmed, but the free-block queue is upstream LRU"
+node_eviction = false
+prefetch = true
+prompt_seeds = true
+pseudo_dynamic = true
+
+[none]
+description = "the ours build with both halves off -- the floor to measure from"
+node_eviction = false
+prefetch = false

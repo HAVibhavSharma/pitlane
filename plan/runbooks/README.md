@@ -10,6 +10,7 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
 | [02-continuum.md](02-continuum.md) | vLLM-Continuum | `$VLLM_CONTINUUM_REPO` | `$VLLM_CONTINUUM_VENV` |
 | [03-ours.md](03-ours.md) | vLLM + prefetch + node eviction | `$VLLM_OURS_REPO` | `$VLLM_OURS_VENV` |
 | [04-parallel.md](04-parallel.md) | two stacks at once, one per GPU | all three | all three |
+| [05-ablation.md](05-ablation.md) | which half of `ours` the numbers come from | `$VLLM_OURS_REPO` | `$VLLM_OURS_VENV` |
 
 ## Conventions
 

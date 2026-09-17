@@ -132,26 +132,64 @@ def stop_lmcache(config: Config) -> None:
 
 
 # -- vLLM ------------------------------------------------------------------
+def server_environment(config: Config, arm: Arm, cell: Path) -> dict[str, str]:
+    """Exactly what `start_server` exports into the server's tmux session.
+
+    Split out from the launch so it can be asserted on without a GPU: the
+    server's environment is the arm's `server_env` and nothing else -- no env
+    file, no os.environ -- which is the reason BENCH_NODE_EVICTION has to be
+    applied here rather than simply set.
+    """
+    repo = config.paths.vllm_repos[arm.repo]
+    venv = config.paths.venvs.get(arm.venv)
+
+    env = arm.resolved_env("server", repo=repo, cell=cell,
+                           model=config.model_name, port=config.port)
+    env["VLLM_REQUEST_STATS_DIR"] = str(cell / "stats")
+    # Without this every arm loads onto card 0 whatever BENCH_GPU says, which
+    # on a two-GPU box means the second concurrent stack lands on top of the
+    # first and both die on VRAM -- after an eight-minute boot each.
+    env["CUDA_VISIBLE_DEVICES"] = str(config.gpu)
+    # Only for the arm that runs the policy. Membership is "does this arm's
+    # server_env declare VLLM_NODE_EVICTION_POLICY at all", not `name ==
+    # "ours"`: an arm that never asked for the policy must not acquire it from
+    # a variable set for somebody else, and baseline and continuum are the
+    # control -- a flag that could switch them is a flag that can invalidate
+    # the comparison. A future ours-variant picks it up by declaring the key,
+    # which is the same thing that makes it an eviction arm.
+    if config.node_eviction is not None and "VLLM_NODE_EVICTION_POLICY" in arm.server_env:
+        # "" is the arms.toml idiom for "unset before launch" -- the filter
+        # below drops it -- and unset is what the fork calls upstream: no
+        # controller, the LRU free-block queue exactly as it ships. Applied
+        # after the arm's own env so the flag wins, which is the point of it.
+        env["VLLM_NODE_EVICTION_POLICY"] = "1" if config.node_eviction else ""
+        logger.info(
+            "arm %s: node eviction forced %s by BENCH_NODE_EVICTION (the arm "
+            "asks for %r)",
+            arm.name,
+            "on" if config.node_eviction else "off (upstream LRU)",
+            arm.server_env["VLLM_NODE_EVICTION_POLICY"],
+        )
+    elif config.node_eviction is not None:
+        logger.info(
+            "arm %s declares no eviction policy; BENCH_NODE_EVICTION does not "
+            "apply to it", arm.name,
+        )
+    # Each build lives in its own virtualenv; `vllm` on PATH is whichever one
+    # the shell activated, which for a multi-arm run is the wrong one twice out
+    # of three times.
+    env = config_mod.venv_env(venv, env)
+    return {k: v for k, v in env.items() if v != ""}
+
+
 def start_server(config: Config, arm: Arm, cell: Path) -> Path:
     """Launch the arm's vLLM and block until it serves /v1/models."""
     repo = config.paths.vllm_repos[arm.repo]
     venv = config.paths.venvs.get(arm.venv)
     log_path = cell / arm.log_name
-    stats_dir = cell / "stats"
-    stats_dir.mkdir(parents=True, exist_ok=True)
+    (cell / "stats").mkdir(parents=True, exist_ok=True)
 
-    env = arm.resolved_env("server", repo=repo, cell=cell,
-                           model=config.model_name, port=config.port)
-    env["VLLM_REQUEST_STATS_DIR"] = str(stats_dir)
-    # Without this every arm loads onto card 0 whatever BENCH_GPU says, which
-    # on a two-GPU box means the second concurrent stack lands on top of the
-    # first and both die on VRAM -- after an eight-minute boot each.
-    env["CUDA_VISIBLE_DEVICES"] = str(config.gpu)
-    # Each build lives in its own virtualenv; `vllm` on PATH is whichever one
-    # the shell activated, which for a multi-arm run is the wrong one twice out
-    # of three times.
-    env = config_mod.venv_env(venv, env)
-    env = {k: v for k, v in env.items() if v != ""}
+    env = server_environment(config, arm, cell)
 
     args = " ".join(
         shlex.quote(a)

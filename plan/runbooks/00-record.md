@@ -81,10 +81,13 @@ print(len(jobs), "jobs:", dict(jobs))
 PY
 ```
 
-Every record row must carry `record_started_s` / `record_finished_s` — the wall
-stamps that give the gap between one call finishing and the next one starting.
-A trace recorded before they existed still replays, but every
-`replay_prefetch_completion` row logs `slack_s: null`.
+Every record row should carry `record_started_s` / `record_finished_s` — the
+wall stamps that give the gap between one call finishing and the next one
+starting. They were load-bearing for the replay oracle, which used them to
+decide when to fire a warm; that is gone, so nothing reads them at replay time
+any more and a trace recorded without them replays identically. Kept because
+they are the only record of the recording run's own pacing, which is what a
+later gap analysis would need.
 
 ```bash
 python - <<'EOS'

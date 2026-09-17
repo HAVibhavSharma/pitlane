@@ -100,45 +100,81 @@ only `/v1/agents/*` does — so skipping it leaves the registry empty and every
 prefetch silently no-ops. Do not pass `--skip-system-prompt-population` unless
 a previous invocation seeded the same server.
 
-### 4b. Prefetch routes and their switches
+### 4b. Where prefetches come from
 
-Five routes fire in this arm; each writes its own `event` into
-`job_*.replay_prefetch.jsonl`, so they can be separated after the run and one
-can be turned off without touching the others.
+The replay oracle is gone. It read the recorded response before the live
+request went out, resolved the upcoming tool calls through the graph's
+transition rules and warmed the successor with the producer's whole
+prefill+decode as lead time — an upper bound on what perfect, perfectly-early
+prediction could buy, which is why it only ever belonged in its own arm. It
+and its five routes (`replay_prefetch`, `_nested`, `_completion`,
+`compress_research_seed`, `final_report_seed`) were removed from
+open_deep_research, along with `prefetch_timing`. No
+`job_*.replay_prefetch.jsonl` is written any more, and none of
+`ODR_REPLAY_PREFETCH*`, `ODR_COMPRESS_SEED`, `ODR_FINAL_REPORT_SEED`,
+`ODR_PREFETCH_JIT` or `ODR_REACT_PREFETCH_TOP_K` does anything.
 
-| event | fires | seed |
+Two sources remain, and `agent_prefetch.jsonl` holds both:
+
+| source | fires | lead |
 |---|---|---|
-| `replay_prefetch` | before the producing call | none |
-| `replay_prefetch_nested` | before the producing call | none |
-| `replay_prefetch_completion` | the instant the response returns | next turn's exact messages |
-| `compress_research_seed` | terminal researcher turn | the compress prompt |
-| `final_report_seed` | supervisor request goes out | the whole final-report prompt |
+| system prompt population | once, before the measured phase | n/a — seeding, not prediction |
+| langgraph's live predictor | when a tool-call name appears in the producer's streaming deltas | small, and the point of the arm |
 
-```bash
-ODR_REPLAY_PREFETCH=0                # the two up-front routes
-ODR_REPLAY_PREFETCH_ON_COMPLETION=0  # the completion route
-ODR_REPLAY_PREFETCH_SEED_MESSAGES=0  # keep the completion route, drop its seed
-ODR_COMPRESS_SEED=0                  # the compress prefill
-ODR_FINAL_REPORT_SEED=0              # the final-report prefill
-ODR_REACT_PREFETCH_TOP_K=5           # prefixes a react warm asks for
-```
+The live predictor's lead is the number to watch. A tool call is emitted near
+the *end* of a generation — the model writes content first — and nothing runs
+between the producer's eos and the predicted node, since `supervisor_tools`
+invokes the researcher subgraph directly. `prefetch_lead_mean_s` and the late
+percentage in `results.csv` are measuring exactly that squeeze; under the
+oracle they were measuring the recording instead.
 
-`final_report_seed` targets the largest prompt in the run — 11k-70k chars,
-of which only 132 are shareable with anything else, because `{research_brief}`
-sits near the top and shifts everything after it. It is rebuilt from the
-supervisor's own request and seeded while that call decodes.
+### The prompt seeds
 
-`compress_research_seed` and `final_report_seed` are the routes whose wrong
-guesses cost compute rather than a POST: `compress_research` opens with its own system block, so it
-shares no prefix with the researcher conversation it then copies verbatim and
-the whole history is prefilled from nothing. The seed pays that prefill in the
-gap instead. Idle-only now (below), but still compute — run it as its own arm.
+Two prompts in this graph share no usable prefix with anything the server has
+already computed, so both prefill from scratch on the critical path:
 
-All three send `prefill_on_miss`, which the server defaults on: a phantom whose
-prefix LMCache does not hold prefills it instead of aborting. The scheduler
-only admits such a phantom into a step with **no real request running**, and
-drops it if no idle step arrives — so the cost lands on idle GPU time and HBM
-pressure, never on another request's token budget.
+- **`final_report_generation`** — 11k-70k chars, of which a measured 132 are
+  shareable with anything else, because `{research_brief}` sits 132 characters
+  into the template and shifts everything after it.
+- **`compress_research`** — opens with its own system block and then copies the
+  researcher conversation verbatim, so it shares no prefix with the chain it
+  copies: zero shared leading messages on 33/33 compress calls in a recorded
+  run.
+
+`prompt_seeds.py` rebuilds both from requests that have **already gone out**
+and prefills them during a gap. It replaces the oracle's two seed routes and
+reads no recording, in any trace mode — asserted structurally by
+`tests/check_prompt_seeds.py`, which also checks the final-report seed is
+byte-identical to the prompt the node goes on to send.
+
+| seed | built from | fires at |
+|---|---|---|
+| `final_report_seed` | the supervisor request going out (brief, findings) + the buffer lifted from `write_research_brief` | every supervisor turn whose findings changed |
+| `compress_research_seed` | the researcher request going out, message 0 swapped for compress's system block | the turn that will hit the iteration cap |
+| `compress_research_seed_extended` | that, plus the reply just received | the same turn's response, if it carries tool calls |
+
+The compress seed is short by one assistant message on the request pass —
+it cannot contain a reply that has not been generated. The extended pass adds
+it, and has the turn's tool phase to prefill in. What is never covered is the
+final turn's tool results, which exist only at the instant
+`compress_research` is dispatched.
+
+Only the iteration-cap exit is seeded. The other two exits (`no tool calls`,
+`ResearchComplete`) are properties of the reply, and by the time they are known
+`researcher_tools` routes straight to compression with no gap to prefill in.
+
+`BENCH_PROMPT_SEEDS=0` turns both off; `ODR_COMPRESS_SEED=0` and
+`ODR_FINAL_REPORT_SEED=0` turn off one each. Rows land in
+`job_*.prompt_seeds.jsonl`.
+
+These are speculative **prefills**, not promotions — the one thing here whose
+wrong guesses cost compute rather than a POST. Run it as its own arm.
+
+`prefill_on_miss` still applies to what the population phase sends: a phantom
+whose prefix LMCache does not hold prefills instead of aborting. The scheduler
+admits such a phantom only into a step with **no real request running**, and
+drops it if no idle step arrives, so the cost lands on idle GPU time and HBM
+pressure rather than another request's token budget.
 
 ```bash
 VLLM_PREFETCH_PREFILL_MAX_RUNNING=0       # real requests tolerated (0 = strictly idle)
@@ -148,17 +184,7 @@ VLLM_PREFETCH_PREFILL_DEFER_TIMEOUT_S=30  # then finish it without prefilling
 Check the seeds landed and the prefills found a gap:
 
 ```bash
-python - <<'EOS'
-import json, os, glob
-for path in glob.glob(os.path.join(os.environ["CELL"], "*.replay_prefetch.jsonl")):
-    rows = [json.loads(l) for l in open(path)]
-    for event in sorted({r["event"] for r in rows}):
-        sel = [r for r in rows if r["event"] == event]
-        took = sum(1 for r in sel if r.get("seeded_from_messages"))
-        pre = sum(1 for r in sel if r.get("prefill_on_miss"))
-        print(f"{event:30s} {len(sel):4d} rows, {took:4d} seeds accepted, "
-              f"{pre:4d} allowed to prefill")
-EOS
+jq -r '.event' "$CELL/agent_prefetch.jsonl" | sort | uniq -c
 
 # did the deferred prefills ever get an idle step?
 python - <<'EOS'
@@ -171,11 +197,8 @@ for path in glob.glob(os.path.join(os.environ["CELL"], "stats", "scheduler_engin
 EOS
 ```
 
-`seeds accepted` at 0 on rows that sent one means the server predates
-`messages=` on `/v1/agents/prefetch` — it warmed the registry's shorter prefix
-instead, silently. `expired` tracking `deferrals` means the run never had an
-idle step, so no phantom prefill ever ran and the warms fell back to promotion
-only.
+`expired` tracking `deferrals` means the run never had an idle step, so no
+phantom prefill ever ran and the warms fell back to promotion only.
 
 ### 5. Collect, then teardown
 

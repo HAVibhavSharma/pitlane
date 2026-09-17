@@ -365,11 +365,15 @@ client never saw. Two knock-ons:
 
 - `wait` decides whether the metric is meaningful, and both callers set it
   explicitly, so the endpoint's own default never applies. The measurement
-  path (`replay_prefetch.py:343,414`) sends `wait=false` — fire-and-forget, so
-  the phantom overlaps the producer's decode and the overlap test is the right
-  one. The seeding phase (`system_prompt_population.py:352`) sends `wait=true`
-  on purpose, to block until L1 is warm; its phantoms are setup, not
-  measurement, and the collector excludes them by the question window. The
+  path is now langgraph's own predictor
+  (`_prediction.py:BackgroundVLLMAgentWorker`), which sends `wait=false` —
+  fire-and-forget, so the phantom overlaps the producer's decode and the
+  overlap test is the right one. (The replay oracle in
+  open_deep_research took the same route and has been removed; see
+  `runbooks/03-ours.md` §4b.) The seeding phase
+  (`system_prompt_population.py:352`) sends `wait=true` on purpose, to block
+  until L1 is warm; its phantoms are setup, not measurement, and the collector
+  excludes them by the question window. The
   runner records the flag per cell and refuses to compute late % if a cell's
   prefetches were issued with `wait=true`, where a phantom cannot be late by
   construction.

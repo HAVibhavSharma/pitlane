@@ -223,6 +223,10 @@ class StubConfig:
         # The arm's `{port}` placeholders resolve against this, the way
         # `LANGGRAPH_VLLM_ECHO_BASE_URL` does for a real arm.
         self.port = 8000
+        # Read by the arm-flag overrides in workflow.run, like the real Config.
+        self.prefetch = None
+        self.seed_prefixes = None
+        self.prompt_seeds = None
 
     def base_url(self, suffix: str = "") -> str:
         return f"http://127.0.0.1:8000{suffix}"
