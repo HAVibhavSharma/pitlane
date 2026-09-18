@@ -10,7 +10,7 @@ card frees up first. Roughly halves an eleven-hour batch.
 ## Read this first
 
 The two GPUs are separate. Everything else is not: the arms share CPU, memory
-bandwidth, the disk under `$LMCACHE_L2_DIR`, and the network to Tavily and
+bandwidth, the disk under `$BENCH_ROOT`, and the network to Tavily and
 LangSmith.
 
 | Column | Co-tenancy safe? |
@@ -63,15 +63,17 @@ Four things used to be constants and are now per stack, in
 | `BENCH_PORT` (vLLM) | 8000 | 8001 |
 | `BENCH_LMCACHE_PORT` | 10903 | 10904 |
 | `BENCH_INSTANCE` → tmux sessions | `vllm`, `lmcache` | `vllm-b`, `lmcache-b` |
-| `BENCH_INSTANCE` → `$LMCACHE_L2_DIR` | `…/lmcache` | `…/lmcache-b` |
+| `BENCH_INSTANCE` → `$LMCACHE_L2_DIR` (only if a disk tier is set) | `…/lmcache` | `…/lmcache-b` |
 | `KV_FORECAST_REDIS_URL` | db 0 | db 1 |
 
 The tmux names matter more than they look: `start_server` kills the session it
 is about to use, so two stacks sharing the name `vllm` means the second launch
 tears down the first arm's server — hours in, with no error anywhere.
 
-The L2 directory is the same hazard on disk, and it arrived later because it
-could not fire until both arms ran an LMCache server. `start_lmcache` wipes the
+The L2 directory is the same hazard on disk, and it is latent rather than live:
+`LMCACHE_L2_DIR` is blank by default, so there is no disk tier for two stacks to
+share. It is scoped anyway, because the day someone sets a path is not the day
+to rediscover this. `start_lmcache` wipes the
 path with `rm -rf` and then starts the server, so two stacks sharing it means
 the second stack's wipe deletes the first stack's live backing files and that
 server goes on answering with keys whose files are gone — the exact state the

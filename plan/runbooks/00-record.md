@@ -18,11 +18,14 @@ free -g | awk '/Mem:/ {print "free RAM (GB):", $7}'                     # ≥ 20
 ss -ltn | grep -q ':8000 ' && echo "PORT 8000 BUSY" || echo "port 8000 free"
 ```
 
-### 2. LMCache — stop, wipe, start
+### 2. LMCache — stop, start
+
+No disk tier: `LMCACHE_L2_DIR` is blank in `common.env`, so `--l2-adapter` is
+omitted and the restart is the whole wipe. Nothing to delete, and nothing left
+over for the next cell to find.
 
 ```bash
 tmux kill-session -t lmcache 2>/dev/null
-rm -rf "$LMCACHE_L2_DIR"
 
 tmux new-session -d -s lmcache
 tmux send-keys -t lmcache 'LMCACHE_LOG_KV_HASH=1 lmcache server \
@@ -30,8 +33,7 @@ tmux send-keys -t lmcache 'LMCACHE_LOG_KV_HASH=1 lmcache server \
   --eviction-policy LRU \
   --chunk-size 16 \
   --host 0.0.0.0 \
-  --port 10903 \
-  --l2-adapter "{\"type\":\"fs\",\"base_path\":\"'"$LMCACHE_L2_DIR"'\"}"' Enter
+  --port 10903' Enter
 ```
 
 ### 3. vLLM — baseline build

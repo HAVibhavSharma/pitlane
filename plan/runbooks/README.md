@@ -44,8 +44,11 @@ of truth the orchestrator encodes; run them by hand when debugging one arm.
   `lmcache`, `vllm`, `workflow`. Start detached (`tmux new-session -d -s NAME`)
   so an ssh drop does not kill the run. A second concurrent stack suffixes
   them with its `BENCH_INSTANCE` (`vllm-b`) -- see [04-parallel.md](04-parallel.md).
-- **LMCache wipe and restart are one operation**, in this order: stop → delete
-  `$LMCACHE_L2_DIR` → start. Wiping under a live server leaves its in-memory
+- **LMCache is restarted between cells, and the restart is the wipe.**
+  `LMCACHE_L2_DIR` is blank, so there is no disk tier: the whole store is the
+  in-memory L1 pool and stopping the server takes it with it. Set a path to get
+  the tier back and the rule returns with it — stop → delete → start, in that
+  order and never partly, since wiping under a live server leaves its in-memory
   L1 index pointing at deleted files.
 - **Readiness gate** after every `vllm serve`, never a fixed sleep:
   ```bash

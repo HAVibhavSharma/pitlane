@@ -17,16 +17,18 @@ Same checks as [00-record.md](00-record.md) step 1, plus Redis:
 redis-cli -u redis://127.0.0.1:6379/0 ping        # expect PONG
 ```
 
-### 2. LMCache — stop, wipe, start
+### 2. LMCache — stop, start
+
+No disk tier: `LMCACHE_L2_DIR` is blank in `common.env`, so `--l2-adapter` is
+omitted and the restart is the whole wipe. Nothing to delete, and nothing left
+over for the next cell to find.
 
 ```bash
 tmux kill-session -t lmcache 2>/dev/null
-rm -rf "$LMCACHE_L2_DIR"
 tmux new-session -d -s lmcache
 tmux send-keys -t lmcache 'LMCACHE_LOG_KV_HASH=1 lmcache server \
   --l1-size-gb 200 --eviction-policy LRU --chunk-size 16 \
-  --host 0.0.0.0 --port 10903 \
-  --l2-adapter "{\"type\":\"fs\",\"base_path\":\"'"$LMCACHE_L2_DIR"'\"}"' Enter
+  --host 0.0.0.0 --port 10903' Enter
 ```
 
 ### 3. vLLM — our build
