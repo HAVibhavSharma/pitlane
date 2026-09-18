@@ -38,6 +38,30 @@ def vllm_session(config: Config) -> str:
 def lmcache_session(config: Config) -> str:
     return "lmcache" if config.instance == "default" else f"lmcache-{config.instance}"
 
+
+def lmcache_l2_dir(config: Config) -> Path | None:
+    """This stack's L2 store, which is per instance for the same reason the
+    session names are.
+
+    `start_lmcache` wipes the directory before it starts the server, and the
+    wipe is an `rm -rf`. Two stacks sharing one path therefore means the second
+    stack's wipe deletes the first stack's live backing files, leaving that
+    server to serve keys whose files are gone -- the exact state the wipe-then-
+    start ordering exists to prevent, arriving from the side.
+
+    It never fired while the designed pair was baseline + continuum, because
+    continuum drives LMCache in-process and starts no server at all, so only
+    one L2 store was ever live. A pair of `ours`-derived arms -- which is what
+    the ablation ladder is -- both run one.
+
+    The default instance keeps the bare path, so a single-stack box and every
+    runbook that names `$LMCACHE_L2_DIR` are unchanged.
+    """
+    base = config.paths.lmcache_l2_dir
+    if base is None or config.instance == "default":
+        return base
+    return base.with_name(f"{base.name}-{config.instance}")
+
 # Lines that mean the boot is dead; polling for readiness past one of these
 # just burns the timeout.
 _FATAL_LOG_PATTERNS = (
@@ -91,7 +115,7 @@ def restart_lmcache(config: Config, arm: Arm | None = None, *,
 
     l1_size_gb = config.lmcache_l1_gb if l1_size_gb is None else l1_size_gb
     venv = lmcache_venv(config, arm)
-    target = config.paths.lmcache_l2_dir
+    target = lmcache_l2_dir(config)
     adapter_arg = ""
     if target is not None:
         if target.exists():

@@ -34,6 +34,24 @@ failures early at half the wall clock. Re-run sequentially with
 Nothing in the results says which of the two a row came from, so keep the run
 ids straight: a run produced by this script is a co-tenanted run, all of it.
 
+## Running the ablation ladder on two cards
+
+The ladder is three arms, which is the shape this script already has:
+
+```bash
+PAIR="ours_full ours_predictor_only" THIRD=ours_no_prefetch ./launch-parallel.sh 50
+```
+
+Put the two arms whose **latency** difference you most want in the `PAIR`.
+They are co-tenants of each other, so they are degraded symmetrically and their
+comparison is the fairest one this mode can produce; the `THIRD` runs with the
+box increasingly to itself and is flattered against both. Everything token-level
+— hit rates, prefetch accuracy, usefulness — is safe whichever way round they go.
+
+Read [05-ablation.md](05-ablation.md) first for what the three modes mean, and
+note that all three derive from `ours`, so unlike the default pairing every arm
+here starts an LMCache server and needs Redis.
+
 ## What makes the two stacks independent
 
 Four things used to be constants and are now per stack, in
@@ -45,11 +63,25 @@ Four things used to be constants and are now per stack, in
 | `BENCH_PORT` (vLLM) | 8000 | 8001 |
 | `BENCH_LMCACHE_PORT` | 10903 | 10904 |
 | `BENCH_INSTANCE` → tmux sessions | `vllm`, `lmcache` | `vllm-b`, `lmcache-b` |
+| `BENCH_INSTANCE` → `$LMCACHE_L2_DIR` | `…/lmcache` | `…/lmcache-b` |
 | `KV_FORECAST_REDIS_URL` | db 0 | db 1 |
 
 The tmux names matter more than they look: `start_server` kills the session it
 is about to use, so two stacks sharing the name `vllm` means the second launch
 tears down the first arm's server — hours in, with no error anywhere.
+
+The L2 directory is the same hazard on disk, and it arrived later because it
+could not fire until both arms ran an LMCache server. `start_lmcache` wipes the
+path with `rm -rf` and then starts the server, so two stacks sharing it means
+the second stack's wipe deletes the first stack's live backing files and that
+server goes on answering with keys whose files are gone — the exact state the
+wipe-then-start ordering exists to prevent, arriving from the side. The pair
+this runbook was written for is `baseline` + `continuum`, and continuum drives
+LMCache in-process and starts no server, so only one L2 store was ever live. A
+pair of `ours`-derived arms — which is what [the ablation
+ladder](05-ablation.md) is — both run one. The path is now per instance, and
+the default instance keeps the bare `$LMCACHE_L2_DIR` so a single-stack box and
+every runbook that names it are unchanged.
 
 The arms no longer hard-code `localhost:8000` either; `arms.toml` says
 `{port}`, which resolves to the stack's own. An arm pointed at the wrong port

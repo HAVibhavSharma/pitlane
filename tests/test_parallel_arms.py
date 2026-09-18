@@ -88,6 +88,25 @@ def check_config(root: Path) -> None:
           (stack.vllm_session(solo), stack.lmcache_session(solo))
           == ("vllm", "lmcache"))
 
+    print("\n== the LMCache L2 store cannot be shared either")
+    # start_lmcache wipes this path with rm -rf before starting the server, so
+    # two stacks sharing it means the second one's wipe deletes the first one's
+    # live backing files. Only ever bit once both arms ran an LMCache server,
+    # which the baseline + continuum pair never did and two ours-derived
+    # ablation arms always do.
+    l2 = write_env(root, "l2.env", "LMCACHE_L2_DIR=/disk2/lmcache\n")
+    a = Config.load([base, l2, write_env(root, "a.env", "BENCH_INSTANCE=default\n")])
+    b = Config.load([base, l2, write_env(root, "b.env", "BENCH_INSTANCE=b\n")])
+    check("the two stacks wipe different L2 directories",
+          stack.lmcache_l2_dir(a) != stack.lmcache_l2_dir(b))
+    check("a lone stack keeps the documented path",
+          str(stack.lmcache_l2_dir(a)) == "/disk2/lmcache")
+    check("stack B's path is the base plus its label",
+          str(stack.lmcache_l2_dir(b)) == "/disk2/lmcache-b")
+    # L1-only is a valid configuration and stays one: no disk tier to scope.
+    l1_only = Config.load([base, write_env(root, "l1.env", "BENCH_INSTANCE=b\n")])
+    check("no L2 dir stays no L2 dir", stack.lmcache_l2_dir(l1_only) is None)
+
     print("\n== the workflow is pointed at its own server")
     arm = Arm(
         name="stub", description="", repo="baseline", lmcache_server=False,
