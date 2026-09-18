@@ -52,7 +52,7 @@ boot is a config flag, not the default.
 | `question_selector` | Resolves the question set (index or id) from the benchmark the workflow uses; keeps question identity stable across arms so cells line up. |
 | `epoch_manager` | Between questions on a shared server: `POST /v1/kv_metrics/reset`, HBM flush (leave the workflow's default flush on), stats-file offset bookmark, fresh `ODR_TRACE_REPORT` and agent-log paths. |
 | `metrics_collector` | Parses `VLLM_REQUEST_STATS_DIR/finished_requests_engine0_*.jsonl`, the divergence report, and the vLLM agent log into one `metrics.json` per cell. |
-| `reporter` | Aggregates cells into `results.csv` + a per-question comparison table (one row per arm: TTFT, hit rate, query tokens, token hits, late prefetch %), plus a per-run `summary.md`. |
+| `reporter` | Aggregates cells into `results.csv` + a per-question comparison table (one row per arm: TTFT, hit rate, query tokens, token hits, accurate prefetch %, late prefetch %), plus a per-run `summary.md`. |
 | `state_store` | `state.json` per run: which cells are done, their artifact paths, git SHAs of all three repos, and the resolved env (secrets redacted). |
 
 ---
@@ -201,7 +201,11 @@ arrival window.
 | **KV hit rate** | Tokens already resident in HBM / query tokens: `Σ num_local_cached_tokens / Σ num_prompt_tokens` over real requests. External (LMCache) hits reported as a separate column, never folded in. | request JSONL |
 | **Query tokens** | `Σ num_prompt_tokens` — every prompt token the question sent to the server. The hit rate's denominator, as an absolute count. | request JSONL |
 | **Token hits** | `Σ num_local_cached_tokens` — how many of those were already in HBM. The hit rate's numerator, as an absolute count. | request JSONL |
-| **Total prefetches** | Count of phantoms issued for the question — one per `/v1/agents/prefetch` fan-out, i.e. `prefetch_only=true` rows. The denominator of the late %, reported as an absolute count so a small percentage of a handful of prefetches is not read as a small percentage of many. | `agent_prefetch.jsonl` + request JSONL |
+| **Total prefetches** | Count of phantoms issued for the question — one per `/v1/agents/prefetch` fan-out, i.e. `prefetch_only=true` rows, less the seeding phase's (see **Population prefetches**). The denominator of the late %, reported as an absolute count so a small percentage of a handful of prefetches is not read as a small percentage of many. | `agent_prefetch.jsonl` + request JSONL |
+| **Population prefetches** | The system-prompt population phase's warms, counted and then held out of every prefetch column. They are setup, not prediction, so they belong in no rate; a cell with none of them at all is the registry going unseeded, which is why they are reported rather than dropped. → `population_prefetches` | request JSONL |
+| **Accurate prefetches** | Of the phantoms issued for the question: accurate if the node it named is what the question went on to do next — nothing *unpredicted* ran between the warm and the request it warmed. The predictor's own score, and the only prefetch column that is a judgement about the prediction rather than about what the server did with it. → `accurate_prefetches` | request JSONL (this cell only) |
+| **Accurate prefetch %** | `accurate_prefetches / total_prefetches`. The three verdicts partition the phantoms exactly — `accurate + displaced + unused == total_prefetches` — so a cell that does not add up means the join lost a row. → `accurate_prefetch_pct` | derived |
+| **Displaced prefetches** | The warm named a node that did run, but something nobody had warmed ran first: right about *what*, wrong about *next*. Counted per phantom as `displaced_by`, the number of unpredicted requests that cut in front of its consumer. → `displaced_prefetches` | request JSONL (this cell only) |
 | **Late prefetch %** | Of the phantoms issued for the question: late if it left too close in front of the request it warms to have bought anything, `consumer.arrival_ts - phantom.arrival_ts < BENCH_PREFETCH_LEAD_MIN_S`. Both stamps are the engine's own `arrival_ts` on the two request rows, so HTTP receipt and chat-template time cancel and what is left is the lead the prefetcher actually bought. `unused` (no consumer ever arrived) counted separately. → `late_prefetches`, `late_prefetch_pct` | request JSONL (this cell only) |
 | **Prefetch lead** | `consumer.arrival_ts - phantom.arrival_ts`, mean and min over the phantoms that had a consumer. The distribution behind the late %, and the thing to look at before choosing the threshold. → `prefetch_lead_mean_s`, `prefetch_lead_min_s`, threshold echoed as `prefetch_lead_min_threshold_s` | request JSONL |
 | **Max lead / min lead** | The two `/v1/echo` markers as the server stamped them: `max_lead_ts`, when the workflow oracle issued the warm, and `min_lead_ts`, when the graph runtime parsed the tool call naming the node — the earliest a real predictor could know. Recorded as the instants themselves. → `max_lead_ts`, `min_lead_ts` | `server.log` `/v1/echo` markers |
@@ -333,6 +337,80 @@ did, which is the difference between "13.5% hit rate" and "the three
 They land in `requests.csv` at the run root, one row per chat completion across
 every cell, and in `metrics.json` under `per_request` for the cell alone.
 
+Accurate prefetch, and why it is a displacement test rather than a
+next-arrival one. The three prefetch columns answer three different questions
+about one phantom, in causal order: was the guess right (**accurate**), did it
+leave early enough for the answer to matter (**late**), and did it actually move
+tokens into HBM that something hit (**useful**). Only the first is about the
+predictor. A correct prediction fired 40 ms ahead of its consumer is accurate
+and late; a correct prediction whose prefix HBM already held is accurate and
+useless. Those are facts about the serving stack, and reading them as prediction
+quality is what an ablation of the predictor cannot afford to do — `ours_no_seeds`
+and `ours_predictor_only` differ in what is warmed, not in how well the next node
+is guessed, and without this column there is no number that separates them.
+
+The natural definition is "the node the phantom named is the node that ran
+next", and taken literally that is wrong on this workload. The supervisor
+dispatches several researchers under one `asyncio.gather`; langgraph parses
+several tool calls, issues a warm for each, and the requests then land in
+whatever order the scheduler admits them. Under a strict next-arrival test a
+three-way fan-out marks two of three correct predictions wrong, and a perfect
+predictor scores 33% — the failure mode where the metric reads as broken
+machinery rather than as a wrong threshold.
+
+So the test is displacement. A phantom is accurate when nothing *unpredicted*
+ran ahead of the request it named: every real request arriving between the warm
+and its consumer was itself some phantom's consumer. Concurrent siblings cannot
+displace each other, because each of them was warmed too; a node nobody warmed
+running first is the predictor being surprised, and that is exactly what the
+metric should catch. The count of such requests is `displaced_by` on the phantom
+row, and the verdict is `displaced_by == 0`.
+
+The three outcomes partition the phantoms exactly — `accurate + displaced +
+unused == total_prefetches` — which is worth asserting rather than assuming,
+since the whole thing is a join and a lost row would otherwise show up as a
+quietly better number. **Unused** is the extreme inaccuracy: the node was never
+run at all, so there is no interval to count over and `displaced_by` is null
+rather than zero. One bias to read with it: the last warms of a question have no
+consumer because the question ended, not because they were wrong, so accuracy is
+bounded below by the tail. On a 50-question batch that tail was 19 phantoms out
+of 2342, which is the order of magnitude to expect.
+
+There is a looser reading of the same question — *did the node the phantom named
+ever run* — and it needs no column of its own, because it is `total_prefetches -
+unused_prefetches`. It is reported that way rather than as a percentage because
+it carries almost no signal: on that same cell it is 99.2%, and it cannot really
+be otherwise. A React node warmed on one of its ten turns will always have
+another turn coming, so for every repeating node the loose test asks a question
+whose answer is yes by construction. The strict reading is the one that
+discriminates, and it is what `accurate_prefetch_pct` reports.
+
+One caveat before comparing arms on this column: **a prompt seed is not a
+prediction of what runs next, and will read as displaced by construction.** The
+final-report seed fires at every supervisor turn whose findings changed, and the
+report it warms runs after everything else the graph has left to do; being
+displaced by twenty requests is the seed working as designed, not the predictor
+being wrong. `ours_full` therefore has a lower accuracy than `ours_no_seeds`
+while predicting exactly as well. Split on `langgraph_node` in `prefetches.csv`
+before reading the cell number — the seeds are the `compress_research` and
+`final_report_generation` rows — and treat a cell-level comparison across arms
+that differ in seeding as uninterpretable. The exact split would be the phantom's
+`issuer` (`langgraph` for the predictor, `workflow` for a seed, `population` for
+the seeding phase), which `agent_prefetch.jsonl` records and the request rows do
+not; joining the two is the change to make if the two sources ever collide on a
+node that matters.
+
+Accuracy is counted per phantom, unlike **useful**, which is charged to the
+consumer so that a `top_k` fan-out naming one consumer cannot bank the same hit
+`top_k` times. That is deliberate and is the right unit for each: if the
+predictor offers five candidates and one is right, its precision is 1 in 5, and
+the useful count still may not exceed the one hit that happened. The two columns
+are therefore not comparable as counts and only as rates — and read together
+they are the diagnostic that matters. Measured on the n50 `ours` cell: 77.7%
+accurate against 23.5% useful. The predictor mostly knows what comes next; three
+quarters of the warms it issues still move nothing, which is a statement about
+the cache and not about the prediction.
+
 Late prefetch, and why it is a lead test rather than an overlap test. The
 question a phantom has to answer is "did it leave early enough to matter", and
 that is `consumer.arrival_ts - phantom.arrival_ts` — the lead. Both stamps live
@@ -373,7 +451,14 @@ client never saw. Two knock-ons:
   `runbooks/03-ours.md` §4b.) The seeding phase
   (`system_prompt_population.py:352`) sends `wait=true` on purpose, to block
   until L1 is warm; its phantoms are setup, not measurement, and the collector
-  excludes them by the question window. The
+  excludes them **by their id**, `langgraph:*:**:...` — a `*` anywhere in the
+  agent id or the request id. The window was doing this job on an isolated
+  cell, where the seeding runs before the question does; on a batch cell the
+  window opens at the process and the seeding falls inside it, so seven
+  population warms were reaching the prefetch columns of the n50 `ours` cell
+  and landing in `unused_prefetches`. They carry no agent id at all, having
+  been issued before there was a job to attribute them to, so nothing could
+  ever have consumed them. The
   runner records the flag per cell and refuses to compute late % if a cell's
   prefetches were issued with `wait=true`, where a phantom cannot be late by
   construction.
@@ -556,8 +641,24 @@ questions that were never meant to be added together. The per-request rows
 already carry `job_id`, so this is a regroup of data that exists rather than a
 second collection pass, and the question is the unit everything is compared at.
 
+Two of its columns are derived rather than summed, and both need their origin
+stated. **TTFT** is the same quantity the cell reports -- question submit to the
+first token of the final output -- but a batch cell has exactly one dispatch
+stamp for N questions, so here the origin is the question's own first request
+arrival, the earliest instant belonging to it alone. The two agree on an
+isolated cell up to the workflow's startup and seeding phase, which the dispatch
+stamp includes and this does not; `final_ttft_s` beside it is the terminal
+call's own queue-plus-prefill, which is the part the final-report prompt seed
+exists to move, and the gap between the two columns is everything the graph did
+before that call was dispatched. **Accuracy** is counted off the phantom rows
+rather than the request rows, because the verdict is a property of the phantom;
+a file written before those columns existed reports them blank rather than
+scoring every warm as unused.
+
 `results.csv` is one row per cell, `requests.csv` one row per chat completion
-and `prefetches.csv` one row per phantom (all three prefixed with `arm` /
+and `prefetches.csv` one row per phantom -- carrying, beside its span, the
+consumer it was matched to and the accuracy verdict (`consumer_request_id`,
+`displaced_by`, `accurate`) -- (all three prefixed with `arm` /
 `question_id` / `rep`, so each is groupable on its own);
 `summary.md` pivots `results.csv` into one table per question, a row per arm,
 with the question's total tokens in the header.

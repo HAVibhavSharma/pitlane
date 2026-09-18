@@ -186,6 +186,186 @@ def build_useful_cell(tmp: Path) -> Path:
     return cell
 
 
+def build_accuracy_cell(tmp: Path) -> Path:
+    """Four phantoms, one per verdict the accuracy metric has to separate.
+
+    The interesting case is the fan-out: the supervisor dispatches two
+    researchers at once, both are warmed, and they land in the opposite order.
+    Neither prediction was wrong, and a metric that asks "was mine the very
+    next request" would mark one of them so.
+    """
+    cell = tmp / "ours" / "q3" / "rep1"
+    stats = cell / "stats"
+    warm = dict(prefetch_only=True, num_prompt_tokens=1_000, num_cached_tokens=0,
+                num_local_cached_tokens=0, num_external_cached_tokens=0,
+                num_generation_tokens=1)
+    call = dict(prefetch_only=False, queued_time=0.1, prefill_time=0.2,
+                decode_time=2.0, num_prompt_tokens=2_000, num_cached_tokens=1_024,
+                num_local_cached_tokens=1_024, num_external_cached_tokens=0,
+                num_generation_tokens=50)
+    requests = [
+        # -- accurate: the warmed node is what ran next, nothing in between.
+        dict(request_id="p_sup", job_id="j3", agent_id="supervisor",
+             langgraph_node="supervisor", arrival_ts=T0 + 1, finish_ts=T0 + 2, **warm),
+        dict(request_id="r_sup", job_id="j3", agent_id="supervisor",
+             langgraph_node="supervisor", arrival_ts=T0 + 3, finish_ts=T0 + 8, **call),
+
+        # -- two researchers dispatched together, warmed together, landing in
+        #    the other order. Both predictions were right.
+        dict(request_id="p_ra", job_id="j3", agent_id="researcher_a",
+             langgraph_node="researcher", arrival_ts=T0 + 9, finish_ts=T0 + 10, **warm),
+        dict(request_id="p_rb", job_id="j3", agent_id="researcher_b",
+             langgraph_node="researcher", arrival_ts=T0 + 9, finish_ts=T0 + 10, **warm),
+        dict(request_id="r_rb", job_id="j3", agent_id="researcher_b",
+             langgraph_node="researcher", arrival_ts=T0 + 11, finish_ts=T0 + 16, **call),
+        dict(request_id="r_ra", job_id="j3", agent_id="researcher_a",
+             langgraph_node="researcher", arrival_ts=T0 + 12, finish_ts=T0 + 17, **call),
+
+        # -- displaced: compress was warmed, but a summarize call nobody
+        #    predicted ran first. The prediction was of the wrong *next*.
+        dict(request_id="p_comp", job_id="j3", agent_id="compress",
+             langgraph_node="compress_research", arrival_ts=T0 + 18,
+             finish_ts=T0 + 19, **warm),
+        dict(request_id="r_summ", job_id="j3", agent_id="summarize",
+             langgraph_node="summarize_webpage", arrival_ts=T0 + 20,
+             finish_ts=T0 + 25, **call),
+        dict(request_id="r_comp", job_id="j3", agent_id="compress",
+             langgraph_node="compress_research", arrival_ts=T0 + 26,
+             finish_ts=T0 + 30, **call),
+
+        # -- unused: a node that never ran at all.
+        dict(request_id="p_ghost", job_id="j3", agent_id="never",
+             langgraph_node="researcher", arrival_ts=T0 + 31, finish_ts=T0 + 32, **warm),
+
+        # -- the seeding phase, inside the window because a batch cell opens at
+        #    the process. Its routing was never logged, which is the state
+        #    these rows arrive in, so only the id says what they are.
+        dict(request_id="prefetch::langgraph:*:**:researcher::abc123",
+             job_id=None, agent_id=None, langgraph_node=None,
+             arrival_ts=T0 + 0.5, finish_ts=T0 + 0.6, **warm),
+        dict(request_id="r_final", job_id="j3", agent_id="final",
+             langgraph_node="final_report_generation", arrival_ts=T0 + 33,
+             finish_ts=T0 + 45, **call),
+    ]
+    _write(stats / "finished_requests_engine0_x.jsonl", requests)
+    _write(cell / "agent_prefetch.jsonl",
+           [dict(agent_id="supervisor", wait=False, top_k=1)])
+    (cell / "question_started_ts").write_text(f"{T0}\n")
+    return cell
+
+
+def check_accuracy(tmp: Path) -> None:
+    """Accuracy scores the predictor, and nothing the other columns already do."""
+    cell = build_accuracy_cell(tmp)
+    m = metrics.collect(cell, arm="ours", question_id="q3", t0=T0, t1=T0 + 100)
+
+    # Five phantoms to score. The population warm is held apart: it predicts
+    # nothing, so charging the predictor for it would be a sixth denominator
+    # with no question behind it.
+    assert m.total_prefetches == 5, m.total_prefetches
+    assert m.population_prefetches == 1, m.population_prefetches
+    assert all("*" not in (g["request_id"] or "") for g in m.per_prefetch)
+    # supervisor + the two concurrent researchers: the fan-out is the case a
+    # next-arrival test would get wrong, so it must not be scored as wrong here.
+    assert m.accurate_prefetches == 3, m.accurate_prefetches
+    assert m.displaced_prefetches == 1, m.displaced_prefetches
+    assert m.unused_prefetches == 1, m.unused_prefetches
+    assert abs(m.accurate_prefetch_pct - 0.6) < 1e-9, m.accurate_prefetch_pct
+    # The three verdicts partition the phantoms; a phantom in two of them, or
+    # in none, means the join lost one.
+    assert (m.accurate_prefetches + m.displaced_prefetches
+            + m.unused_prefetches) == m.total_prefetches
+
+    spans = {g["request_id"]: g for g in m.per_prefetch}
+    assert spans["p_sup"]["accurate"] is True
+    assert spans["p_sup"]["consumer_request_id"] == "r_sup"
+    assert spans["p_sup"]["displaced_by"] == 0
+    # Each researcher warm names its own consumer, and its sibling's request
+    # arriving first does not count against it -- that sibling was predicted.
+    assert spans["p_ra"]["consumer_request_id"] == "r_ra"
+    assert spans["p_rb"]["consumer_request_id"] == "r_rb"
+    assert spans["p_ra"]["accurate"] is True and spans["p_ra"]["displaced_by"] == 0
+    assert spans["p_rb"]["accurate"] is True
+    # One unpredicted call ran ahead of compress, so the warm was right about
+    # the node and wrong about when.
+    assert spans["p_comp"]["accurate"] is False
+    assert spans["p_comp"]["displaced_by"] == 1, spans["p_comp"]["displaced_by"]
+    assert spans["p_comp"]["consumer_request_id"] == "r_comp"
+    # Nothing it was aimed at ever ran: no consumer, and no interval to count
+    # over, which is an absence rather than a displacement of zero.
+    assert spans["p_ghost"]["accurate"] is False
+    assert spans["p_ghost"]["displaced_by"] is None
+    assert spans["p_ghost"]["consumer_request_id"] is None
+
+    # Accuracy and usefulness are different questions and must be free to
+    # disagree: the compress warm is inaccurate and still credited tokens.
+    per = {e["request_id"]: e for e in m.per_request}
+    assert per["r_comp"]["useful"] is True, per["r_comp"]
+    assert m.useful_prefetches != m.accurate_prefetches
+
+    print("accuracy:", f"{m.accurate_prefetches}/{m.total_prefetches} accurate,",
+          f"{m.displaced_prefetches} displaced, {m.unused_prefetches} unused")
+    print("\nall accuracy assertions passed")
+
+
+def check_by_question(tmp: Path) -> None:
+    """The per-question regroup carries the same verdicts, plus its own TTFT."""
+    from pitlane import report
+
+    run = tmp / "byq"
+    cell = build_accuracy_cell(tmp / "byq_cell")
+    m = metrics.collect(cell, arm="ours", question_id="q3", t0=T0, t1=T0 + 100)
+    report.append_request_rows(run / "requests.csv", m)
+    report.append_prefetch_rows(run / "prefetches.csv", m)
+
+    rows = report.by_question(run)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["job_id"] == "j3" and row["requests"] == 6, row
+    # Counted off the phantom rows, so the cell and the question agree.
+    assert row["prefetches"] == m.total_prefetches
+    assert row["accurate_prefetches"] == m.accurate_prefetches
+    assert row["displaced_prefetches"] == m.displaced_prefetches
+    assert row["unused_prefetches"] == m.unused_prefetches
+    assert abs(row["accurate_prefetch_pct"] - 0.6) < 1e-9, row
+
+    # TTFT for the question: its own first request (T0+3) to the first token of
+    # the final report (T0+33 + 0.1 queue + 0.2 prefill).
+    assert abs(row["ttft_s"] - 30.3) < 1e-6, row["ttft_s"]
+    assert abs(row["final_ttft_s"] - 0.3) < 1e-9, row["final_ttft_s"]
+    assert row["ttft_source_node"] == "final_report_generation", row
+    # The cell counts from the runner's dispatch stamp instead, which is three
+    # seconds earlier here -- the same quantity from a different origin, and
+    # the reason the column is derived rather than copied.
+    assert abs(m.ttft_s - 33.3) < 1e-6, m.ttft_s
+
+    written = report.write_by_question(run)
+    header = written.read_text().splitlines()[0]
+    for column in ("ttft_s", "final_ttft_s", "accurate_prefetches",
+                   "accurate_prefetch_pct"):
+        assert column in header.split(","), header
+
+    # A file written before these columns existed must read as unknown, not as
+    # "every warm unused" -- a blank `displaced_by` means never consumed.
+    legacy = tmp / "legacy"
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / "requests.csv").write_text((run / "requests.csv").read_text())
+    text = (run / "prefetches.csv").read_text().splitlines()
+    keep = [i for i, name in enumerate(text[0].split(","))
+            if name not in ("consumer_request_id", "displaced_by", "accurate")]
+    (legacy / "prefetches.csv").write_text("\n".join(
+        ",".join(line.split(",")[i] for i in keep) for line in text) + "\n")
+    old = report.by_question(legacy)[0]
+    assert old["accurate_prefetches"] is None, old
+    assert old["accurate_prefetch_pct"] is None and old["unused_prefetches"] is None
+    assert old["prefetches"] == m.total_prefetches, old
+
+    print("by_question:", {k: row[k] for k in
+                           ("ttft_s", "final_ttft_s", "prefetches",
+                            "accurate_prefetches", "accurate_prefetch_pct")})
+    print("\nall by-question assertions passed")
+
+
 # Verbatim shapes from a real server.log, so the parser is pinned against what
 # `echo_router._format` actually emits rather than against a guess.
 ECHO_LOG = """\
@@ -877,6 +1057,8 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         check(Path(tmp))
         check_useful(Path(tmp))
+        check_accuracy(Path(tmp))
+        check_by_question(Path(tmp))
         check_poisoned_intervals(Path(tmp))
         check_lead_markers(Path(tmp))
         check_timeline(Path(tmp))

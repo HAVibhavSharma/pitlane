@@ -10,6 +10,7 @@ Sources, all wall-clock epoch seconds and therefore joinable:
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import statistics
@@ -402,9 +403,22 @@ class Metrics:
     workflow_output_tokens: int = 0
 
     total_prefetches: int = 0
+    # The seeding phase's warms, held apart from every prefetch column: they
+    # are setup rather than prediction, and counting them would charge the
+    # predictor for work it did not do.
+    population_prefetches: int = 0
     late_prefetches: int = 0
     unused_prefetches: int = 0
     useful_prefetches: int = 0
+    # Was the prediction right? A phantom names a node; accurate means that node
+    # is what the question actually did next. It is a judgement about the
+    # predictor and nothing else -- not whether the warm was early enough
+    # (`late`) and not whether it moved any tokens (`useful`), both of which a
+    # correct prediction can still fail. The three outcomes partition the
+    # phantoms exactly: `accurate + displaced + unused == total`.
+    accurate_prefetches: int = 0
+    displaced_prefetches: int = 0
+    accurate_prefetch_pct: float | None = None
     # Per *agent*, not per call. A React node is warmed on every turn it takes,
     # so a node that is reliably helped by prefetching counts once here instead
     # of once per turn -- which is the difference between "how many warms paid
@@ -492,7 +506,17 @@ def collect(
     rows = _window(_read_glob(stats_dir, "finished_requests_engine*.jsonl"), t0, t1)
     _apply_routing(rows, cell)
     real = [r for r in rows if not r.get("prefetch_only")]
-    phantom = [r for r in rows if r.get("prefetch_only")]
+    warms = [r for r in rows if r.get("prefetch_only")]
+    # The seeding phase's warms are setup, not measurement, and must not reach
+    # the prefetch columns: they predict nothing, and nothing consumes them
+    # under their wildcard ids. The window is what usually excludes them --
+    # they run before the question does -- but a batch cell's window opens at
+    # the process, which is before the seeding phase, so the id is the test
+    # that holds either way. Counted rather than dropped, since a cell with no
+    # population warms at all is the registry going unseeded.
+    population = [r for r in warms if _is_population(r)]
+    phantom = [r for r in warms if not _is_population(r)]
+    metrics.population_prefetches = len(population)
     metrics.requests = len(real)
 
     if not rows:
@@ -611,6 +635,21 @@ def _requests(metrics: Metrics, real: list[dict[str, Any]]) -> None:
         metrics.per_request.append(entry.to_dict())
 
 
+def _is_population(row: dict[str, Any]) -> bool:
+    """Was this phantom issued by the system-prompt population phase?
+
+    Concrete workflow agents are `langgraph:<unit>:<node>`; the population
+    phase warms a node in every unit at once and names it `langgraph:*:**:...`,
+    so a `*` anywhere in the id is the mark. The request id is checked as well
+    as the agent id because it carries the same namespace and survives a row
+    whose routing the server never logged -- which is the state these rows are
+    usually in, being issued before the graph has a job to attribute them to.
+    """
+    mark = "*"
+    return (mark in str(row.get("agent_id") or "")
+            or mark in str(row.get("request_id") or ""))
+
+
 def _credited_tokens(ghost: dict[str, Any], consumer: dict[str, Any]) -> int:
     """HBM residency this phantom added that its consumer went on to hit.
 
@@ -633,6 +672,74 @@ def _credited_tokens(ghost: dict[str, Any], consumer: dict[str, Any]) -> int:
     return max(credited, 0)
 
 
+def _accuracy(
+    metrics: Metrics,
+    span_of: dict[int, dict[str, Any]],
+    matched: list[tuple[dict[str, Any], dict[str, Any]]],
+    ordered: list[dict[str, Any]],
+) -> None:
+    """Was the prediction right -- did the node a phantom named run next?
+
+    This is the predictor's own score, and it is the one thing the other
+    prefetch columns cannot say. `useful` asks whether tokens moved, `late`
+    whether the lead was worth having; both are answers about what the *server*
+    did with a warm, and both can punish a correct prediction (a right guess
+    fired 40 ms early is late, and a right guess whose prefix HBM already held
+    is useless). Accuracy asks only whether the guess named the request that
+    actually came, which is what an ablation of the predictor has to move.
+
+    The test is displacement rather than strict next-arrival order, because the
+    graph fans out: the supervisor dispatches three researchers under one
+    `asyncio.gather`, langgraph parses three tool calls and issues three warms,
+    and the three requests then land in whatever order the scheduler admits
+    them. Under a rank-1 test two of those three correct predictions would read
+    as wrong, and a perfect predictor would score 33%.
+
+    So a phantom is accurate when nothing *unpredicted* ran ahead of the request
+    it named: every real request arriving between the warm and its consumer was
+    itself some phantom's consumer. Concurrent siblings therefore do not
+    displace each other, while a node nobody warmed -- which is the predictor
+    being surprised -- displaces whatever it cut in front of.
+
+    Two notes on the edges. A phantom with no consumer at all is inaccurate and
+    carries a null `displaced_by`: there is no interval over which to count, and
+    the prediction failed outright. And the count is scoped to the consumer's
+    own `job_id`, so in a batch cell one question's requests cannot displace
+    another's.
+    """
+    predicted = {id(consumer) for _, consumer in matched}
+    lanes: dict[Any, list[dict[str, Any]]] = {}
+    for row in ordered:
+        lanes.setdefault(row.get("job_id"), []).append(row)
+    # `ordered` is sorted by arrival and each lane preserves that order, so the
+    # stamps are a sorted key list and the window start is a bisect.
+    stamps = {job: [r.get("arrival_ts") or 0.0 for r in rows]
+              for job, rows in lanes.items()}
+    position = {job: {id(r): i for i, r in enumerate(rows)}
+                for job, rows in lanes.items()}
+
+    for ghost, consumer in matched:
+        # Keyed on the consumer's job, not the phantom's: the consumer is a row
+        # in `ordered` by construction, so its lane always exists.
+        job = consumer.get("job_id")
+        rows = lanes[job]
+        issued = ghost.get("arrival_ts") or 0.0
+        start = bisect.bisect_left(stamps[job], issued)
+        stop = position[job][id(consumer)]
+        displaced = sum(1 for row in rows[start:stop] if id(row) not in predicted)
+        span = span_of[id(ghost)]
+        span["displaced_by"] = displaced
+        span["accurate"] = displaced == 0
+
+    metrics.accurate_prefetches = sum(
+        1 for span in metrics.per_prefetch if span["accurate"])
+    metrics.displaced_prefetches = sum(
+        1 for span in metrics.per_prefetch if span["displaced_by"])
+    if metrics.total_prefetches:
+        metrics.accurate_prefetch_pct = (
+            metrics.accurate_prefetches / metrics.total_prefetches)
+
+
 def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
               real: list[dict[str, Any]], lead_min_s: float = LEAD_MIN_S) -> None:
     """Attribute every phantom to the chat completion it warmed.
@@ -648,11 +755,12 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
         modes = {str(r.get("wait")) for r in agent_log if "wait" in r}
         if modes:
             metrics.prefetch_wait_mode = ",".join(sorted(modes))
+    span_of: dict[int, dict[str, Any]] = {}
     for ghost in sorted(phantom, key=lambda r: r.get("arrival_ts") or 0.0):
         started = ghost.get("arrival_ts")
         finished = ghost.get("finish_ts")
         queued = _interval(ghost.get("queued_time"))
-        metrics.per_prefetch.append({
+        span = {
             "job_id": ghost.get("job_id"),
             "agent_id": ghost.get("agent_id"),
             "langgraph_node": ghost.get("langgraph_node"),
@@ -676,7 +784,15 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
             # Not "zero decode" but "no decode phase": `max_tokens=1` and the
             # prefetch-only finalize path means no sampling step ever runs.
             "decode_s": None,
-        })
+            # Filled in below, once every phantom has been matched to its
+            # consumer -- a phantom's accuracy is a statement about what ran
+            # ahead of it, so it cannot be decided one phantom at a time.
+            "consumer_request_id": None,
+            "displaced_by": None,
+            "accurate": False,
+        }
+        span_of[id(ghost)] = span
+        metrics.per_prefetch.append(span)
     if not phantom:
         return
 
@@ -688,6 +804,7 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
     entry_of = {id(row): metrics.per_request[i] for i, row in enumerate(ordered)}
 
     leads: list[float] = []
+    matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for ghost in phantom:
         issued = ghost.get("arrival_ts") or 0.0
         finished = ghost.get("finish_ts") or 0.0
@@ -697,11 +814,16 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
             None,
         )
         if consumer is None:
+            # Nothing this phantom was aimed at ever ran, so the prediction was
+            # wrong in the plainest way there is. It stays `accurate: False`
+            # with a null displacement -- there is no interval to count over.
             metrics.unused_prefetches += 1
             continue
 
         entry = entry_of[id(consumer)]
         entry["prefetches"] += 1
+        matched.append((ghost, consumer))
+        span_of[id(ghost)]["consumer_request_id"] = consumer.get("request_id")
 
         # Lead: how far in front of the request it warms this phantom left.
         # Both stamps are the engine's `arrival_ts`, so the HTTP and
@@ -730,6 +852,8 @@ def _prefetch(metrics: Metrics, cell: Path, phantom: list[dict[str, Any]],
         if credited > entry["credited_tokens"]:
             entry["credited_tokens"] = credited
             entry["useful"] = True
+
+    _accuracy(metrics, span_of, matched, ordered)
 
     metrics.late_prefetches = sum(e["late_prefetches"] for e in metrics.per_request)
     metrics.useful_prefetches = sum(1 for e in metrics.per_request if e["useful"])

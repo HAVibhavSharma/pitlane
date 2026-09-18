@@ -15,13 +15,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pitlane.metrics import Metrics
+from pitlane.metrics import FINAL_NODE_CANDIDATES, Metrics
 
 _COLUMNS = [
     "arm", "question_id", "rep", "cache_state",
     "ttft_s", "kv_hit_rate", "query_tokens", "token_hits",
     "external_token_hits", "workflow_output_tokens",
-    "total_prefetches", "late_prefetches", "late_prefetch_pct", "unused_prefetches",
+    "total_prefetches", "population_prefetches",
+    "late_prefetches", "late_prefetch_pct", "unused_prefetches",
+    "accurate_prefetches", "accurate_prefetch_pct", "displaced_prefetches",
     "useful_prefetches", "useful_prefetch_pct",
     "distinct_prefetch_agents", "distinct_useful_agents", "distinct_useful_pct",
     "prefetch_lead_mean_s", "prefetch_lead_min_s",
@@ -105,9 +107,9 @@ def summary(results_csv: Path) -> str:
         lines += [header, ""]
         lines += [
             "| Arm | rep | cache | Chats | TTFT (s) | KV hit rate | Query tokens | "
-            "Token hits | Prefetches | Useful | Useful % | Late % | Lead (mean s) | "
-            "Oracle window (s) | Waiting (max) | Notes |",
-            "|---|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "Token hits | Prefetches | Accurate % | Useful | Useful % | Late % | "
+            "Lead (mean s) | Oracle window (s) | Waiting (max) | Notes |",
+            "|---|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in sorted(subset, key=lambda r: (r["arm"], int(r["rep"] or 1))):
             notes = []
@@ -125,6 +127,9 @@ def summary(results_csv: Path) -> str:
                 f"{_fmt(row['kv_hit_rate'], '.2%')} | "
                 f"{_fmt(row['query_tokens'])} | {_fmt(row['token_hits'])} | "
                 f"{_fmt(row['total_prefetches'])} | "
+                # Was the guess right, before any question of whether it paid:
+                # the column an ablation of the predictor has to move.
+                f"{_fmt(row.get('accurate_prefetch_pct'), '.0%')} | "
                 f"{_fmt(row['useful_prefetches'])} | "
                 f"{_fmt(row['useful_prefetch_pct'], '.0%')} | "
                 f"{_fmt(row['late_prefetch_pct'], '.0%')} | "
@@ -157,6 +162,7 @@ _PREFETCH_COLUMNS = [
     "arm", "question_id", "rep", "job_id", "agent_id", "langgraph_node",
     "request_id", "arrival_ts", "finish_ts", "elapsed_ms",
     "queued_s", "prefill_s", "decode_s", "prompt_tokens",
+    "consumer_request_id", "displaced_by", "accurate",
 ]
 
 
@@ -226,9 +232,12 @@ def write_metrics(cell: Path, metrics: Metrics) -> Path:
 _BY_QUESTION_COLUMNS = [
     "arm", "question_id", "rep", "job_id",
     "requests", "query_tokens", "token_hits", "external_token_hits",
-    "kv_hit_rate", "output_tokens", "wall_s",
+    "kv_hit_rate", "output_tokens",
+    "ttft_s", "final_ttft_s", "ttft_source_node", "wall_s",
     "queued_s", "prefill_s", "decode_s",
-    "prefetches", "useful_prefetches", "useful_prefetch_pct",
+    "prefetches", "accurate_prefetches", "accurate_prefetch_pct",
+    "displaced_prefetches", "unused_prefetches",
+    "useful_prefetches", "useful_prefetch_pct",
     "distinct_prefetch_agents", "distinct_useful_agents", "distinct_useful_pct",
     "late_prefetches",
 ]
@@ -245,6 +254,55 @@ def _truthy(value: str | None) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
+def _opt(value: str | None) -> float | None:
+    """A CSV cell as a number, or None where it was blank rather than zero."""
+    if value in (None, "", "None"):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _question_ttft(rows: list[dict[str, str]]) -> tuple[float | None, float | None, str | None]:
+    """Question submit -> first token of the final output, and that call's own TTFT.
+
+    The same quantity `results.csv` reports, measured from a different origin
+    and for one question rather than one cell. The cell's TTFT counts from the
+    runner's dispatch stamp, and a batch cell has exactly one of those for N
+    questions -- so here the origin is the question's own first request
+    arrival, which is the earliest instant that belongs to it alone. The two
+    agree on an isolated cell up to the workflow's startup and seeding phase,
+    which the dispatch stamp includes and this does not.
+
+    `final_ttft_s` is the terminal call's own queue-plus-prefill, which is the
+    part the final-report prompt seed exists to move; the difference between
+    the two columns is everything the graph did before that call was dispatched.
+    """
+    dated = [r for r in rows if _opt(r.get("arrival_ts")) is not None]
+    if not dated:
+        return None, None, None
+    ordered = sorted(dated, key=lambda r: _num(r.get("arrival_ts")))
+    final: dict[str, str] | None = None
+    node: str | None = None
+    for candidate in FINAL_NODE_CANDIDATES:
+        matches = [r for r in ordered if r.get("langgraph_node") == candidate]
+        if matches:
+            final, node = matches[-1], candidate
+            break
+    if final is None:
+        # No named terminal node -- the last request of the question produced
+        # the final output by definition. Same fallback as the cell-level read.
+        final = ordered[-1]
+        node = final.get("langgraph_node") or "(last request)"
+    final_ttft = _opt(final.get("ttft_s"))
+    if final_ttft is None:
+        return None, None, node
+    first_token = _num(final.get("arrival_ts")) + final_ttft
+    return (round(first_token - _num(ordered[0].get("arrival_ts")), 3),
+            round(final_ttft, 3), node)
+
+
 def by_question(run_dir: Path) -> list[dict[str, Any]]:
     """One row per `(arm, question_id, rep, job_id)`, from the request rows."""
     requests = _read_csv(run_dir / "requests.csv")
@@ -259,9 +317,11 @@ def by_question(run_dir: Path) -> list[dict[str, Any]]:
         groups.setdefault(key, []).append(row)
 
     warmed: dict[tuple[str, str, str, str], set[str]] = {}
+    phantoms: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for row in prefetches:
         key = (row.get("arm", ""), row.get("question_id", ""),
                row.get("rep", ""), row.get("job_id", ""))
+        phantoms.setdefault(key, []).append(row)
         if row.get("agent_id"):
             warmed.setdefault(key, set()).add(row["agent_id"])
 
@@ -280,9 +340,28 @@ def by_question(run_dir: Path) -> list[dict[str, Any]]:
                   if _truthy(r.get("useful")) and r.get("agent_id")}
         warm_set = warmed.get(key, set())
         useful = sum(1 for r in rows if _truthy(r.get("useful")))
-        prefetch_n = sum(1 for r in prefetches
-                         if (r.get("arm"), r.get("question_id"), r.get("rep"),
-                             r.get("job_id")) == key)
+        # Accuracy is a property of the phantom, so it is counted on the
+        # phantom rows -- unlike `useful`, which is charged to the consumer so
+        # that a `top_k` fan-out cannot bank one hit k times. The three
+        # outcomes partition the phantoms: accurate + displaced + unused.
+        warms = phantoms.get(key, [])
+        prefetch_n = len(warms)
+        # A run recorded before these columns existed has phantom rows without
+        # them, and a blank `displaced_by` there means "never consumed" -- so
+        # scoring such a file would read every warm as unused. That is reported
+        # as unknown instead. An arm that simply never prefetches has nothing to
+        # score and 0 is the honest count, which is why an empty list passes.
+        scored = not warms or "accurate" in warms[0]
+        accurate = sum(1 for r in warms if _truthy(r.get("accurate"))) if scored else None
+        displaced = (
+            sum(1 for r in warms if (_opt(r.get("displaced_by")) or 0) > 0)
+            if scored else None
+        )
+        unused = (
+            sum(1 for r in warms if _opt(r.get("displaced_by")) is None)
+            if scored else None
+        )
+        ttft_s, final_ttft_s, ttft_node = _question_ttft(rows)
         out.append({
             "arm": arm, "question_id": question, "rep": rep, "job_id": job,
             "requests": len(rows),
@@ -293,11 +372,24 @@ def by_question(run_dir: Path) -> list[dict[str, Any]]:
             ),
             "kv_hit_rate": round(hits / query, 6) if query else None,
             "output_tokens": int(sum(_num(r.get("output_tokens")) for r in rows)),
+            # Submit -> first token of the final output, from this question's
+            # own first request: a batch cell has one dispatch stamp for N
+            # questions, so the cell's origin cannot be reused here.
+            "ttft_s": ttft_s,
+            "final_ttft_s": final_ttft_s,
+            "ttft_source_node": ttft_node,
             "wall_s": round(max(ends) - min(starts), 3) if starts and ends else None,
             "queued_s": round(sum(_num(r.get("queued_s")) for r in rows), 3),
             "prefill_s": round(sum(_num(r.get("prefill_s")) for r in rows), 3),
             "decode_s": round(sum(_num(r.get("decode_s")) for r in rows), 3),
             "prefetches": prefetch_n,
+            "accurate_prefetches": accurate,
+            "accurate_prefetch_pct": (
+                round(accurate / prefetch_n, 6)
+                if accurate is not None and prefetch_n else None
+            ),
+            "displaced_prefetches": displaced,
+            "unused_prefetches": unused,
             "useful_prefetches": useful,
             "useful_prefetch_pct": round(useful / prefetch_n, 6) if prefetch_n else None,
             "distinct_prefetch_agents": len(warm_set),

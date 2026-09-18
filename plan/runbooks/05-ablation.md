@@ -69,6 +69,14 @@ Columns that mean different things per mode:
   never reorders the free queue.
 - **`ours_no_prefetch` and `ours_none` write no `agent_prefetch.jsonl`.** The
   population phase still runs; its rows carry `issuer: population`.
+- **`accurate_prefetch_pct` is not comparable between a seeded arm and an
+  unseeded one.** It asks whether the node a phantom named is what ran next, and
+  a prompt seed deliberately warms a node that runs much later — so every seed
+  counts as displaced and `ours_full` scores below `ours_no_seeds` while
+  predicting exactly as well. Group `prefetches.csv` by `langgraph_node` and
+  read the predictor's nodes (`researcher`, `researcher_tools`, `supervisor`)
+  rather than the cell number. Within one seeding setting the column is the
+  cleanest signal there is for whether a switch touched the predictor at all.
 - **The prompt seeds are speculative prefills, not promotions.** `ours_full`
   spends compute `ours_no_seeds` does not. It lands on idle steps by
   construction, but it is real, and it is why that pair is the one to run if
