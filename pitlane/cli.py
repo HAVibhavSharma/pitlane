@@ -41,8 +41,11 @@ def _load_config(args: argparse.Namespace) -> Config:
     # four lines, and spelling out the whole chain to add them is how a run
     # ends up silently missing ~/.bench.env.
     files = [Path(p) for p in (args.env or [])] or DEFAULT_ENV_FILES
-    files += [Path(p) for p in (getattr(args, "env_extra", None) or [])]
-    config = Config.load([f for f in files])
+    # Passed as overlays rather than appended, so a stack's own keys survive an
+    # exported copy of the other stack's -- see the ordering note in
+    # `Config.load`.
+    overlays = [Path(p) for p in (getattr(args, "env_extra", None) or [])]
+    config = Config.load(list(files), overlays=overlays)
     if getattr(args, "trace", None):
         config.trace_path = Path(args.trace)
     if getattr(args, "run_id", None):

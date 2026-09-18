@@ -88,6 +88,41 @@ def check_config(root: Path) -> None:
           (stack.vllm_session(solo), stack.lmcache_session(solo))
           == ("vllm", "lmcache"))
 
+    print("\n== an exported key cannot overrule the stack's own overlay")
+    # launch-parallel.sh sources .env with `set -a` to resolve BENCH_ROOT for
+    # itself, which exports stack A's four keys into both children. With the
+    # overlay applied before os.environ they won, and both halves of the run
+    # became the same stack: one tmux session, one port, one card.
+    import os as _os
+    poisoned = dict(BENCH_PORT="8000", BENCH_LMCACHE_PORT="10903",
+                    BENCH_INSTANCE="default", BENCH_GPU="0")
+    saved = {k: _os.environ.get(k) for k in poisoned}
+    _os.environ.update(poisoned)
+    try:
+        b = Config.load([base], overlays=[gpu1, write_env(
+            root, "binst.env", "BENCH_INSTANCE=b\n")])
+        check("the overlay's port survives an exported 8000", b.port == 8001)
+        check("the overlay's LMCache port survives", b.lmcache_port == 10904)
+        check("the overlay's card survives", b.gpu == 1)
+        check("the overlay's instance survives", b.instance == "b")
+        check("so the two stacks still name different sessions",
+              stack.vllm_session(b) == "vllm-b")
+        # A key the overlay does not mention is still steerable from the shell,
+        # which is what the os.environ pass is for.
+        _os.environ["BENCH_RESOURCE_INTERVAL_S"] = "11"
+        steer = Config.load([base, write_env(root, "ri.env",
+                                             "BENCH_RESOURCE_INTERVAL_S=5\n")],
+                            overlays=[gpu1])
+        check("a key the overlay omits is still steerable",
+              steer.resource_interval_s == 11.0)
+        _os.environ.pop("BENCH_RESOURCE_INTERVAL_S", None)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = value
+
     print("\n== the LMCache L2 store cannot be shared either")
     # start_lmcache wipes this path with rm -rf before starting the server, so
     # two stacks sharing it means the second one's wipe deletes the first one's

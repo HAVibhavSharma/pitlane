@@ -210,13 +210,30 @@ class Config:
     run_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
 
     @classmethod
-    def load(cls, env_files: list[Path], overrides: dict[str, str] | None = None) -> "Config":
+    def load(cls, env_files: list[Path], overrides: dict[str, str] | None = None,
+             overlays: list[Path] | None = None) -> "Config":
         env: dict[str, str] = {}
         for path in env_files:
             env.update(load_env_file(path))
         # A real environment variable wins over the files, so a one-off run can
         # be steered without editing them.
         env.update({k: v for k, v in os.environ.items() if k in env})
+        # ...but not over an overlay, which is `--env-extra` and is the more
+        # specific statement: it names the handful of keys that make this
+        # invocation a different stack, and it is passed per invocation rather
+        # than set once for the shell.
+        #
+        # This ordering is load-bearing on a two-GPU box. `launch-parallel.sh`
+        # sources `.env` with `set -a` to resolve BENCH_ROOT for itself, which
+        # exports BENCH_PORT, BENCH_LMCACHE_PORT, BENCH_INSTANCE and BENCH_GPU
+        # into both children -- so with the overlay applied first, every one of
+        # the four keys that distinguishes stack B was overwritten by stack A's
+        # value, and both halves of the run became the same stack: one tmux
+        # session name, one port, one card. It surfaced as `duplicate session:
+        # lmcache` in one arm and, in the other, as its LMCache server being
+        # killed by the arm that then failed to replace it.
+        for path in overlays or []:
+            env.update(load_env_file(path))
         env.update(overrides or {})
 
         def need(key: str) -> str:

@@ -89,6 +89,19 @@ The arms no longer hard-code `localhost:8000` either; `arms.toml` says
 `{port}`, which resolves to the stack's own. An arm pointed at the wrong port
 does not fail, it measures the other arm's server.
 
+`--env-extra` beats an exported variable, and has to. The launcher sources
+`.env` with `set -a` to resolve `BENCH_ROOT` for itself, which exports stack A's
+port, LMCache port, instance and card into both children; when those won, both
+halves of the run became the same stack. The symptoms were `duplicate session:
+lmcache` in one arm and a `server boot failed` in the other, whose LMCache the
+first arm had just killed on its way past. Fixed in `Config.load` — the overlay
+is applied after `os.environ`, since it is the more specific statement — but if
+either symptom appears, check that the two stacks really differ:
+
+```bash
+pitlane --env-extra plan/runbooks/stack-b.env preflight --arm ours | head -3
+```
+
 Attach to either with the usual command plus the suffix:
 
 ```bash
