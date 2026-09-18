@@ -214,24 +214,30 @@ def main() -> int:
 
         check("ablations do not join the default matrix",
               registry.measurement_arms == ["baseline", "continuum", "ours"])
-        check("seven modes exist", len(registry.ablation_arms) == 7)
+        # A ladder of three, not a grid: eviction is on throughout and each
+        # rung drops the layer above it, so `full - predictor_only` is what ODR
+        # adds and `predictor_only - no_prefetch` is what the predictor adds.
+        check("three modes exist", len(registry.ablation_arms) == 3)
+        check("the ladder is in order",
+              registry.ablation_arms == ["ours_full", "ours_predictor_only",
+                                         "ours_no_prefetch"])
 
         expected = {
-            "ours_full":            {"eviction": "1",  "prefetch": "0", "seeds": "1", "pseudo": "1"},
-            "ours_no_seeds":        {"eviction": "1",  "prefetch": "0", "seeds": "0", "pseudo": "1"},
-            "ours_no_pseudo":       {"eviction": "1",  "prefetch": "0", "seeds": "1", "pseudo": "0"},
-            "ours_predictor_only":  {"eviction": "1",  "prefetch": "0", "seeds": "0", "pseudo": "0"},
-            "ours_no_prefetch":     {"eviction": "1",  "prefetch": "1"},
-            "ours_no_eviction":     {"eviction": None, "prefetch": "0", "seeds": "1", "pseudo": "1"},
-            "ours_none":            {"eviction": None, "prefetch": "1"},
+            "ours_full":            {"eviction": "1", "prefetch": "0", "seeds": "1", "pseudo": "1"},
+            "ours_predictor_only":  {"eviction": "1", "prefetch": "0", "seeds": "0", "pseudo": "0"},
+            "ours_no_prefetch":     {"eviction": "1", "prefetch": "1"},
         }
+        # Eviction is the constant, so no rung may turn it off -- an arm
+        # without it is a different build's question, not a step on this ladder.
+        for name in registry.ablation_arms:
+            check(f"{name} keeps node eviction", switches(name)["eviction"] == "1")
         for name, want in expected.items():
             got = switches(name)
             check(f"{name}: " + " ".join(f"{k}={v}" for k, v in want.items()),
                   all(got[k] == v for k, v in want.items()))
 
         # A mode is `ours` in everything but its switches, so a change to the
-        # stack reaches all seven without seven edits.
+        # stack reaches all three without three edits.
         ours = registry["ours"]
         for name in registry.ablation_arms:
             arm = registry[name]
@@ -254,7 +260,7 @@ def main() -> int:
 
         print("\n== a box-wide flag cannot overrule a mode")
         # The overrides are applied after the arm's own env, so without the
-        # guard `BENCH_PROMPT_SEEDS=0` would turn ours_full into ours_no_seeds
+        # guard `BENCH_PROMPT_SEEDS=0` would strip the seeds out of ours_full
         # while it still reported itself as ours_full.
         for flag, value, key, want in (
             ("BENCH_PROMPT_SEEDS", "0", "ODR_PROMPT_SEEDS", "1"),

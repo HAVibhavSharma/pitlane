@@ -62,8 +62,8 @@ Three facts that are not obvious from the names:
   with prefetch off is rejected at load.
 - **The `BENCH_` flags are ignored on an ablation arm.** A mode states its own
   switches; a box-wide variable cannot overrule one. Without that guard
-  `ours_full` with `BENCH_PROMPT_SEEDS=0` in `.env` would run as
-  `ours_no_seeds` and still report itself as `ours_full`.
+  `ours_full` with `BENCH_PROMPT_SEEDS=0` in `.env` would run with its seeds
+  stripped and still report itself as `ours_full`.
 - **`BENCH_SEED_PREFIXES` must stay empty.** The system prompt population
   phase is not an ablation: the registry is written only by `/v1/agent_chat`
   and `/v1/agents/*`, so skipping it leaves every lookup empty and every
@@ -113,7 +113,11 @@ That made `LANGGRAPH_PROMPT_PSEUDO_DYNAMIC=0` nearly free — the warm died
 there anyway. With the date correct, `1` builds on to the next manufactured
 segment (`research_system_prompt` runs to `{mcp_prompt}` instead of stopping
 at `{date}`), so prefetch volume and usefulness both move. It is the one flag
-whose meaning changed, and `ours_no_pseudo` exists to measure it.
+whose meaning changed. It rides with the prompt seeds as one layer of the
+ablation ladder rather than having a mode of its own — see
+[runbooks/05-ablation.md](runbooks/05-ablation.md) — so what a run measures is
+the layer, and splitting the two is a mode away if the layer turns out to
+matter.
 
 ## Two stacks on one box
 

@@ -48,12 +48,12 @@ Then the flag plumbing, which costs nothing and catches most mistakes:
 
 ```bash
 python3 tests/test_arm_flags.py     # expect: all arm-flag assertions passed
-pitlane arms                        # expect: 7 ours_* arms listed
+pitlane arms                        # expect: 3 ours_* arms listed
 ```
 
-`pitlane arms` must show `ours_full ours_no_seeds ours_no_pseudo
-ours_predictor_only ours_no_prefetch ours_no_eviction ours_none`. If any are
-missing, `pitlane/ablation.toml` did not load — stop and report.
+`pitlane arms` must show exactly `ours_full ours_predictor_only
+ours_no_prefetch`. If any are missing, `pitlane/ablation.toml` did not load —
+stop and report.
 
 Preflight the stack:
 
@@ -84,17 +84,17 @@ comparable.
 ## 2. Run the modes
 
 Every mode, one question, one run id. Roughly eight minutes of boot plus one
-question each — budget two to three hours for all seven.
+question each — budget an hour for all three.
 
 ```bash
 export RUN_ID="ablation_smoke_$(date +%Y%m%d_%H%M%S)"
-ARMS="ours_full ours_no_seeds ours_no_pseudo ours_predictor_only ours_no_prefetch ours_no_eviction ours_none" \
+ARMS="ours_full ours_predictor_only ours_no_prefetch" \
   RUN_ID="$RUN_ID" ./launch-batch.sh 1
 ```
 
-**If time is short, run these three first** — they cover all four switches:
-`ours_full`, `ours_predictor_only`, `ours_none`. The other four are
-single-factor confirmations.
+The three are a ladder — full, then prefetch and eviction alone, then eviction
+alone — so each one drops a layer the one before it had, and all three are
+needed to tell which layer a difference came from. Run them all.
 
 Each arm that exits non-zero is reported at the end and does not stop the
 others. Note which failed; a failed arm's checks below will be missing rather
@@ -112,8 +112,7 @@ Every arm's cell is `$CELL_ROOT/<arm>/batch1/rep1`. Run this once — it answers
 most of the table in one pass:
 
 ```bash
-for arm in ours_full ours_no_seeds ours_no_pseudo ours_predictor_only \
-           ours_no_prefetch ours_no_eviction ours_none; do
+for arm in ours_full ours_predictor_only ours_no_prefetch; do
   c="$CELL_ROOT/$arm/batch1/rep1"
   [ -d "$c" ] || { printf '%-22s MISSING CELL\n' "$arm"; continue; }
   evict=$(grep -c "Node-aware KV eviction enabled" "$c"/*.log 2>/dev/null | paste -sd+ | bc)
@@ -132,24 +131,23 @@ Expected:
 | arm | evict_line | langgraph | population | seeds | blocked_prefixes |
 |---|---|---|---|---|---|
 | `ours_full` | ≥1 | >0 | >0 | >0 | 0 or few |
-| `ours_no_seeds` | ≥1 | >0 | >0 | **0** | 0 or few |
-| `ours_no_pseudo` | ≥1 | >0 | >0 | >0 | **many** |
 | `ours_predictor_only` | ≥1 | >0 | >0 | **0** | **many** |
 | `ours_no_prefetch` | ≥1 | **0** | >0 | **0** | 0 |
-| `ours_no_eviction` | **0** | >0 | >0 | >0 | 0 or few |
-| `ours_none` | **0** | **0** | >0 | **0** | 0 |
+
+`evict_line` is `≥1` in every row on purpose: eviction is the constant of this
+ladder, not one of its rungs. A **0** there is the eviction switch failing to
+reach the server, in an arm that never asked for it to be off.
 
 Read the columns as:
 
 - **`evict_line`** — the server logs `Node-aware KV eviction enabled` at boot.
-  Absent means upstream LRU, which is what `node_eviction=false` should
-  produce. Absent when it should be present is the eviction switch not
-  reaching the server.
+  All three modes run the policy, so absent anywhere is the switch not reaching
+  the server (check the tmux pane's `export` lines), never an intended off.
 - **`langgraph`** — prefetches issued by the live predictor. Zero with
   `prefetch=on` means the predictor is disabled, most likely a stale langgraph
   fork or an empty registry.
 - **`population`** — the system prompt population phase. **Must be >0 in every
-  row, including `ours_none`.** It is not an ablation switch: the registry is
+  row, including `ours_no_prefetch`, which issues no other warm at all.** It is not an ablation switch: the registry is
   written only by `/v1/agent_chat` and `/v1/agents/*`, so skipping it leaves
   every lookup empty and every prefetch a silent no-op. A zero here invalidates
   that whole run.
@@ -169,8 +167,8 @@ Read the columns as:
 ## 4. Two checks the loop cannot make
 
 **`ours_full` must reproduce `ours`.** If it does not, `arms.toml` and
-`ablation.toml` disagree and every other row is suspect. Run `ours` as an
-eighth arm into the same run id and compare token counts, which are
+`ablation.toml` disagree and every other row is suspect. Run `ours` as a
+fourth arm into the same run id and compare token counts, which are
 deterministic under pinned replay:
 
 ```bash

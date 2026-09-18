@@ -345,7 +345,7 @@ tokens into HBM that something hit (**useful**). Only the first is about the
 predictor. A correct prediction fired 40 ms ahead of its consumer is accurate
 and late; a correct prediction whose prefix HBM already held is accurate and
 useless. Those are facts about the serving stack, and reading them as prediction
-quality is what an ablation of the predictor cannot afford to do — `ours_no_seeds`
+quality is what an ablation of the predictor cannot afford to do — `ours_full`
 and `ours_predictor_only` differ in what is warmed, not in how well the next node
 is guessed, and without this column there is no number that separates them.
 
@@ -390,8 +390,8 @@ prediction of what runs next, and will read as displaced by construction.** The
 final-report seed fires at every supervisor turn whose findings changed, and the
 report it warms runs after everything else the graph has left to do; being
 displaced by twenty requests is the seed working as designed, not the predictor
-being wrong. `ours_full` therefore has a lower accuracy than `ours_no_seeds`
-while predicting exactly as well. Split on `langgraph_node` in `prefetches.csv`
+being wrong. `ours_full` therefore has a lower accuracy than
+`ours_predictor_only` while predicting exactly as well. Split on `langgraph_node` in `prefetches.csv`
 before reading the cell number — the seeds are the `compress_research` and
 `final_report_generation` rows — and treat a cell-level comparison across arms
 that differ in seeding as uninterpretable. The exact split would be the phantom's

@@ -7,7 +7,7 @@
 # `summary.md` would have nothing to pivot. As separate arms they share a run
 # id and land side by side:
 #
-#   ARMS="ours_full ours_no_seeds ours_no_pseudo" ./launch-batch.sh 50
+#   ARMS="ours_full ours_predictor_only ours_no_prefetch" ./launch-batch.sh 50
 #
 # The four switches, and what they reach:
 #
@@ -32,6 +32,25 @@
 # is written only by /v1/agent_chat and /v1/agents/*, skipping it leaves every
 # lookup empty and every prefetch a silent no-op -- an invalid run, not an
 # ablation.
+#
+# The three modes are a ladder, not a grid. Node eviction is on in all of them
+# -- it is the floor the other mechanisms are built on, and an arm without it
+# is a different build's question -- and each rung removes the layer above:
+#
+#   full             prefetch + prompt seeds + filled prefixes + eviction
+#   predictor_only   prefetch + eviction; ODR adds nothing on top
+#   no_prefetch      eviction alone; nothing is warmed ahead of a request
+#
+# So `full - predictor_only` is what open_deep_research contributes and
+# `predictor_only - no_prefetch` is what langgraph's predictor contributes,
+# with `baseline` as the fourth point below all three. That is three boots of
+# an eleven-hour batch rather than seven, which is the reason for the ladder:
+# every mode is a full re-run of the whole matrix.
+#
+# `prompt_seeds` and `pseudo_dynamic` therefore move together, as one layer.
+# They are separable -- a mode setting one of them is two lines below, and
+# `pitlane arms` will list it -- and worth separating only once a result says
+# the layer matters, since each is another eleven hours.
 
 [full]
 description = "everything on: eviction, predictor, prompt seeds, filled prefixes"
@@ -40,40 +59,15 @@ prefetch = true
 prompt_seeds = true
 pseudo_dynamic = true
 
-[no_seeds]
-description = "full, minus the compress and final-report prompt seeds"
-node_eviction = true
-prefetch = true
-prompt_seeds = false
-pseudo_dynamic = true
-
-[no_pseudo]
-description = "full, but a prefix blocks at its first manufactured segment"
-node_eviction = true
-prefetch = true
-prompt_seeds = true
-pseudo_dynamic = false
-
 [predictor_only]
-description = "the live predictor alone: no prompt seeds, prefixes block early"
+description = "prefetch and eviction: the live predictor with nothing on top"
 node_eviction = true
 prefetch = true
 prompt_seeds = false
 pseudo_dynamic = false
 
 [no_prefetch]
-description = "node eviction alone, nothing warmed ahead of a request"
+description = "eviction alone: nothing is warmed ahead of a request"
 node_eviction = true
 prefetch = false
 
-[no_eviction]
-description = "everything warmed, but the free-block queue is upstream LRU"
-node_eviction = false
-prefetch = true
-prompt_seeds = true
-pseudo_dynamic = true
-
-[none]
-description = "the ours build with both halves off -- the floor to measure from"
-node_eviction = false
-prefetch = false
