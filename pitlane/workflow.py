@@ -478,6 +478,11 @@ def _apply_prefetch_override(env: dict[str, str], config: Config, arm: Arm) -> N
     """
     if config.prefetch is None:
         return
+    if arm.ablation:
+        # An ablation mode states its switches; a variable set for the whole box
+        # must not quietly overrule one, or the mode runs as a different mode
+        # under its own name and the numbers are attributed to the wrong thing.
+        return
     if "KV_EVICTION_DISABLE_PREFETCH" not in arm.workflow_env:
         logger.info(
             "arm %s does not prefetch; BENCH_PREFETCH does not apply to it",
@@ -510,6 +515,11 @@ def _apply_prompt_seeds_override(env: dict[str, str], config: Config,
     happens to read the same variable.
     """
     if config.prompt_seeds is None:
+        return
+    if arm.ablation:
+        # An ablation mode states its switches; a variable set for the whole box
+        # must not quietly overrule one, or the mode runs as a different mode
+        # under its own name and the numbers are attributed to the wrong thing.
         return
     if "KV_EVICTION_DISABLE_PREFETCH" not in arm.workflow_env:
         env.pop("ODR_PROMPT_SEEDS", None)

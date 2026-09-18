@@ -1,4 +1,10 @@
-# Handoff — 2026-09-15
+# Handoff — 2026-09-15  *(superseded)*
+
+> Superseded by [handoff-2026-09-18-ablation.md](handoff-2026-09-18-ablation.md).
+> The **State** section below is stale: both repos have moved several commits
+> on. What stays accurate is the reasoning about the pinned probe, which is the
+> only record of that decision. `TAVILY_CACHE_PINNED` still behaves as
+> described; `TAVILY_API_KEY` has since become `TAVILY_API_KEYS`, a pool.
 
 Session focus: making Tavily searches **execute live while their output is
 replaced by the cache**, so `tavily_search.query` spans time a real search

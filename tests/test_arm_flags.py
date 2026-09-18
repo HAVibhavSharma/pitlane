@@ -252,6 +252,30 @@ def main() -> int:
             check("a mode that cannot mean what it says is rejected",
                   "no_prefetch" in str(exc))
 
+        print("\n== a box-wide flag cannot overrule a mode")
+        # The overrides are applied after the arm's own env, so without the
+        # guard `BENCH_PROMPT_SEEDS=0` would turn ours_full into ours_no_seeds
+        # while it still reported itself as ours_full.
+        for flag, value, key, want in (
+            ("BENCH_PROMPT_SEEDS", "0", "ODR_PROMPT_SEEDS", "1"),
+            ("BENCH_PREFETCH", "0", "KV_EVICTION_DISABLE_PREFETCH", "0"),
+        ):
+            overlay = root / f"clash-{flag}.env"
+            overlay.write_text(f"{flag}={value}\n")
+            cfg = Config.load([base, overlay])
+            check(f"{flag}={value} does not change ours_full",
+                  workflow_env(cfg, "ours_full", root).get(key) == want)
+            check(f"{flag}={value} still reaches plain ours",
+                  workflow_env(cfg, "ours", root).get(key) != want)
+
+        overlay = root / "clash-evict.env"
+        overlay.write_text("BENCH_NODE_EVICTION=0\n")
+        cfg = Config.load([base, overlay])
+        check("BENCH_NODE_EVICTION=0 does not change ours_full",
+              server_env(cfg, "ours_full", root).get("VLLM_NODE_EVICTION_POLICY") == "1")
+        check("BENCH_NODE_EVICTION=0 still reaches plain ours",
+              "VLLM_NODE_EVICTION_POLICY" not in server_env(cfg, "ours", root))
+
         print("\n== a value that is neither fails at load, not at boot")
         try:
             config_with("maybe")

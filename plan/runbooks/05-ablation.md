@@ -74,6 +74,17 @@ Columns that mean different things per mode:
   construction, but it is real, and it is why that pair is the one to run if
   you only run one.
 
+## The BENCH_ flags and the modes do not mix
+
+`BENCH_NODE_EVICTION`, `BENCH_PREFETCH` and `BENCH_PROMPT_SEEDS` are ignored on
+an ablation arm. A mode states its switches, and a variable set for the whole
+box must not quietly overrule one — otherwise `ours_full` with
+`BENCH_PROMPT_SEEDS=0` in `.env` would run as `ours_no_seeds` while still
+reporting itself as `ours_full`. They still apply to plain `ours`, which is
+what they are for: a one-off change without adding a mode.
+
+Leave all three empty in `.env` and pick the arm instead.
+
 ## Adding a mode
 
 `pitlane/ablation.toml`, one block, any subset of the four switches. Omitted

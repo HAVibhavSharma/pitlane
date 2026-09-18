@@ -157,7 +157,12 @@ def server_environment(config: Config, arm: Arm, cell: Path) -> dict[str, str]:
     # control -- a flag that could switch them is a flag that can invalidate
     # the comparison. A future ours-variant picks it up by declaring the key,
     # which is the same thing that makes it an eviction arm.
-    if config.node_eviction is not None and "VLLM_NODE_EVICTION_POLICY" in arm.server_env:
+    if arm.ablation and config.node_eviction is not None:
+        # See the note in workflow._apply_prefetch_override: a mode's own
+        # switches win over anything set for the box.
+        logger.info("arm %s is an ablation mode; BENCH_NODE_EVICTION does not "
+                    "apply to it", arm.name)
+    elif config.node_eviction is not None and "VLLM_NODE_EVICTION_POLICY" in arm.server_env:
         # "" is the arms.toml idiom for "unset before launch" -- the filter
         # below drops it -- and unset is what the fork calls upstream: no
         # controller, the LRU free-block queue exactly as it ships. Applied
