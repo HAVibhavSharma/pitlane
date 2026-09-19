@@ -19,10 +19,13 @@ _PLAN = Path(__file__).resolve().parents[1] / "plan"
 # The arm every ablation mode is derived from, and the switches a mode may set.
 _ABLATION_BASE = "ours"
 _ABLATION_SWITCHES = ("node_eviction", "prefetch", "prompt_seeds",
-                      "pseudo_dynamic")
+                      "pseudo_dynamic", "population")
 # Meaningless with the predictor off: the workflow clears the agent env when
 # prefetch is disabled, so neither reaches anything.
 _NEEDS_PREFETCH = ("prompt_seeds", "pseudo_dynamic")
+# The system prompt population phase, as a CLI flag rather than a variable --
+# and spelled as a negative, so "on" is the absence of an argument.
+_SKIP_POPULATION_FLAG = "--skip-system-prompt-population"
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,19 @@ def _ablation_env(mode: str, switches: dict[str, bool]) -> dict[str, str]:
             "the workflow clears the agent env in that case, so the run would "
             "be `no_prefetch` under another name"
         )
+    # The one combination that produces a run which looks fine and measures
+    # nothing. Only `/v1/agent_chat` and `/v1/agents/*` write the prefix
+    # registry, so an unseeded registry makes every lookup empty and every
+    # warm a silent no-op -- prefetch on paper, absent in fact, and reported
+    # as whatever the mode called itself. With prefetch off there is no lookup
+    # to leave empty, which is the only reason the switch exists.
+    if switches.get("population") is False and switches.get("prefetch") is not False:
+        raise ValueError(
+            f"ablation mode {mode!r} skips the system prompt population phase "
+            "without turning prefetch off; the registry would be empty and "
+            "every prefetch a silent no-op, which is an invalid run rather "
+            "than an ablation"
+        )
     server: dict[str, str] = {}
     workflow: dict[str, str] = {}
     if "node_eviction" in switches:
@@ -151,7 +167,10 @@ def _ablation_env(mode: str, switches: dict[str, bool]) -> dict[str, str]:
         workflow["LANGGRAPH_PROMPT_PSEUDO_DYNAMIC"] = (
             "1" if switches["pseudo_dynamic"] else "0"
         )
-    return {"server_env": server, "workflow_env": workflow}
+    args: list[str] = []
+    if switches.get("population") is False:
+        args.append(_SKIP_POPULATION_FLAG)
+    return {"server_env": server, "workflow_env": workflow, "workflow_args": args}
 
 
 def _ablation_arms(arms: dict[str, Arm],
@@ -160,7 +179,7 @@ def _ablation_arms(arms: dict[str, Arm],
 
     Derived rather than written out so a change to the `ours` stack -- a server
     arg, the venv, the script -- reaches every mode without seven edits, and a
-    mode differs from `ours` in nothing but its four switches.
+    mode differs from `ours` in nothing but its switches.
     """
     base = arms.get(_ABLATION_BASE)
     if base is None or not path.exists():
@@ -180,6 +199,7 @@ def _ablation_arms(arms: dict[str, Arm],
             ablation=True,
             server_env={**base.server_env, **overlay["server_env"]},
             workflow_env={**base.workflow_env, **overlay["workflow_env"]},
+            workflow_args=[*base.workflow_args, *overlay["workflow_args"]],
         )
     return out
 

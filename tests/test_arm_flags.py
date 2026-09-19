@@ -231,6 +231,30 @@ def main() -> int:
         # without it is a different build's question, not a step on this ladder.
         for name in registry.ablation_arms:
             check(f"{name} keeps node eviction", switches(name)["eviction"] == "1")
+
+        # The population phase is a switch only where it means something. With
+        # prefetch on, an unseeded registry makes every lookup empty and every
+        # warm a silent no-op; with prefetch off there is no lookup to leave
+        # empty, and leaving the phase on would prefill every node's system
+        # prompt -- warming ahead of a request, which is what that rung is
+        # defined by not doing.
+        skip = "--skip-system-prompt-population"
+        check("no_prefetch skips the population phase",
+              skip in registry["ours_no_prefetch"].workflow_args)
+        for name in ("ours_full", "ours_predictor_only"):
+            check(f"{name} still seeds the registry",
+                  skip not in registry[name].workflow_args)
+        check("the arm's own args survive the addition",
+              registry["ours_no_prefetch"].workflow_args[:1]
+              == registry["ours"].workflow_args[:1])
+        for mode, bad in (("with prefetch on", {"prefetch": True, "population": False}),
+                          ("with prefetch unstated", {"population": False})):
+            try:
+                arms_mod._ablation_env("bogus", bad)
+                check(f"skipping the population phase {mode} is rejected", False)
+            except ValueError as exc:
+                check(f"skipping the population phase {mode} is rejected",
+                      "silent no-op" in str(exc))
         for name, want in expected.items():
             got = switches(name)
             check(f"{name}: " + " ".join(f"{k}={v}" for k, v in want.items()),

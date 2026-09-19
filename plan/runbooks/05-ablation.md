@@ -11,10 +11,11 @@ One run id, so `summary.md` pivots them against each other. Modes are arms, not
 a runtime flag, because a cell is keyed by `(arm, question, rep)` — two modes
 under one arm name would write to the same directory.
 
-## The four switches
+## The five switches
 
 | switch | variable | reaches |
 |---|---|---|
+| `population` | `--skip-system-prompt-population` (a flag, not a variable) | whether the prefix registry is seeded at all. Only settable to `false` on a mode that also turns `prefetch` off — see below |
 | `node_eviction` | `VLLM_NODE_EVICTION_POLICY` | the vLLM server. Off is upstream LRU — **and no controller, so no `kv_hbm_ttft` line to diff against** |
 | `prefetch` | `KV_EVICTION_DISABLE_PREFETCH` (inverted) | langgraph's live predictor |
 | `prompt_seeds` | `ODR_PROMPT_SEEDS` | the compress and final-report prompt seeds |
@@ -55,6 +56,10 @@ Two differences and a fourth point are what the run is for:
 `ours_full` should reproduce `ours`. If it does not, something in `arms.toml`
 disagrees with `ablation.toml` and every other row is suspect — run it first.
 
+The population phase is a fifth switch and is not a rung: on wherever prefetch
+is, because there it is a precondition rather than a mechanism, and off in
+`ours_no_prefetch` because there it is the only warming left.
+
 `prompt_seeds` and `pseudo_dynamic` move together here, as one layer. They are
 separable and a mode that splits them is two lines in `ablation.toml`, but each
 one is another eleven hours, so split them only once a result says the layer
@@ -70,9 +75,16 @@ answers a question the others cannot.
 
 Columns that mean different things per mode:
 
-- **`ours_no_prefetch` writes no `agent_prefetch.jsonl`.** The population phase
-  still runs; its rows carry `issuer: population`, and the collector holds them
-  out of every prefetch column.
+- **`ours_no_prefetch` warms nothing at all.** No `agent_prefetch.jsonl`, and
+  no population phase either: it is the one mode that passes
+  `--skip-system-prompt-population`. Everywhere else that phase is mandatory —
+  the registry is written only by `/v1/agent_chat` and `/v1/agents/*`, so an
+  unseeded registry makes every warm a silent no-op, and a mode that skips it
+  with prefetch on is rejected at load. Here there is no lookup to leave empty,
+  and the phase would prefill every node's system prompt into HBM, which is
+  warming ahead of a request by another name. So `population_prefetches` is 0
+  in this arm and non-zero in the other two, where the collector holds those
+  rows out of every prefetch column.
 - **All three keep `kv_hbm_ttft`.** That line comes from the eviction
   controller, which is on throughout, so the latency breakdown is comparable
   across the whole ladder. It is the reason eviction is not a rung: switching
@@ -106,7 +118,7 @@ Leave all three empty in `.env` and pick the arm instead.
 
 ## Adding a mode
 
-`pitlane/ablation.toml`, one block, any subset of the four switches. Omitted
+`pitlane/ablation.toml`, one block, any subset of the five switches. Omitted
 switches keep whatever the arm and environment already say. The arm name is
 `ours_<block name>`; `pitlane arms` lists it.
 

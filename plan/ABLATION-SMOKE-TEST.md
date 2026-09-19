@@ -147,10 +147,15 @@ Read the columns as:
   `prefetch=on` means the predictor is disabled, most likely a stale langgraph
   fork or an empty registry.
 - **`population`** — the system prompt population phase. **Must be >0 in every
-  row, including `ours_no_prefetch`, which issues no other warm at all.** It is not an ablation switch: the registry is
-  written only by `/v1/agent_chat` and `/v1/agents/*`, so skipping it leaves
-  every lookup empty and every prefetch a silent no-op. A zero here invalidates
-  that whole run.
+  row where prefetch is on, and 0 in `ours_no_prefetch`.** With prefetch on it
+  is not an ablation switch: the registry is written only by `/v1/agent_chat`
+  and `/v1/agents/*`, so skipping it leaves every lookup empty and every
+  prefetch a silent no-op — a zero there invalidates that whole run. With
+  prefetch off there is no lookup to leave empty, and the phase would only
+  prefill every node's system prompt into HBM, which is warming ahead of a
+  request and the one thing that rung is defined by not doing. So
+  `ours_no_prefetch` passes `--skip-system-prompt-population`, and a
+  **non**-zero there is the failure.
 - **`seeds`** — rows in `prompt_seeds.jsonl`. `>0` needs both `prefetch` and
   `prompt_seeds` on. Note a one-question run may produce only a
   `final_report_seed` row: `compress_research_seed` fires only on a researcher
@@ -203,7 +208,8 @@ label.
 | symptom | most likely cause |
 |---|---|
 | a mode's cell is missing | that arm exited non-zero; read `$CELL_ROOT/<arm>/batch1/rep1/workflow.log` |
-| `population=0` anywhere | the seeding phase was skipped; that run is invalid, not an ablation |
+| `population=0` in an arm that prefetches | the seeding phase was skipped; that run is invalid, not an ablation |
+| `population>0` in `ours_no_prefetch` | the skip flag did not reach the script; that arm warmed its system prompts and is not the floor it claims to be |
 | `langgraph=0` with prefetch on | stale langgraph fork in `$WORKFLOW_VENV`, or the registry was never seeded |
 | `seeds=0` with seeds on | stale `open_deep_research` (no `prompt_seeds.py`), or `ODR_PROMPT_SEEDS_LOG_PATH` not reaching the process |
 | `evict_line=0` with eviction on | `VLLM_NODE_EVICTION_POLICY` not reaching the server; check the tmux pane's `export` lines: `tmux capture-pane -p -t vllm \| grep NODE_EVICTION` |

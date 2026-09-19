@@ -1,7 +1,7 @@
 # Ablation modes for the `ours` arm.
 #
 # Each mode becomes an arm named `ours_<mode>`, derived from `[ours]` in
-# arms.toml with these four switches applied over its env. They are arms and
+# arms.toml with these switches applied over its env. They are arms and
 # not a runtime flag for one reason: a cell is keyed by (arm, question, rep),
 # so two modes under one arm name would write to the same directory and
 # `summary.md` would have nothing to pivot. As separate arms they share a run
@@ -9,7 +9,7 @@
 #
 #   ARMS="ours_full ours_predictor_only ours_no_prefetch" ./launch-batch.sh 50
 #
-# The four switches, and what they reach:
+# The switches, and what they reach:
 #
 #   node_eviction   VLLM_NODE_EVICTION_POLICY   vLLM server; the free-block
 #                   queue is upstream LRU when off
@@ -22,16 +22,22 @@
 #   pseudo_dynamic  LANGGRAPH_PROMPT_PSEUDO_DYNAMIC   whether a manufactured
 #                   segment (date, mcp_prompt, a bare {placeholder}) may be
 #                   filled when building a prefix, or blocks it
+#   population      --skip-system-prompt-population (a CLI flag, and a negative
+#                   one, so "on" is the absence of an argument)  whether the
+#                   prefix registry is seeded before the measured phase
 #
 # Omitting a switch leaves whatever the arm and the environment already say.
 # `prompt_seeds` and `pseudo_dynamic` are only meaningful while `prefetch` is
 # true; a mode that sets them with prefetch off is rejected at load, because
 # the run would silently be the same as `no_prefetch` under a different name.
 #
-# The system prompt population phase is not a switch here. Since the registry
-# is written only by /v1/agent_chat and /v1/agents/*, skipping it leaves every
-# lookup empty and every prefetch a silent no-op -- an invalid run, not an
-# ablation.
+# The system prompt population phase is a switch only where it means something:
+# `population = false` is rejected at load unless `prefetch = false` too. With
+# prefetch on, the registry is written only by /v1/agent_chat and /v1/agents/*,
+# so skipping the phase leaves every lookup empty and every prefetch a silent
+# no-op -- an invalid run, not an ablation. With prefetch off there is no
+# lookup to leave empty, and the phase is simply a prefill of every node's
+# system prompt, which is warming ahead of a request by another name.
 #
 # The three modes are a ladder, not a grid. Node eviction is on in all of them
 # -- it is the floor the other mechanisms are built on, and an arm without it
@@ -39,7 +45,8 @@
 #
 #   full             prefetch + prompt seeds + filled prefixes + eviction
 #   predictor_only   prefetch + eviction; ODR adds nothing on top
-#   no_prefetch      eviction alone; nothing is warmed ahead of a request
+#   no_prefetch      eviction alone; nothing is warmed ahead of a request,
+#                    including the population phase's own prefill
 #
 # So `full - predictor_only` is what open_deep_research contributes and
 # `predictor_only - no_prefetch` is what langgraph's predictor contributes,
@@ -70,4 +77,15 @@ pseudo_dynamic = false
 description = "eviction alone: nothing is warmed ahead of a request"
 node_eviction = true
 prefetch = false
+# The system prompt population phase, off here and nowhere else. It is not an
+# ablation switch anywhere prefetch is on: only /v1/agent_chat and /v1/agents/*
+# write the prefix registry, so an unseeded registry makes every lookup empty
+# and every warm a silent no-op -- prefetch on paper, absent in fact. A mode
+# that tries it with prefetch on is rejected at load.
+#
+# With prefetch off there is no lookup to leave empty, and leaving it on would
+# make this rung "eviction, plus every node's system prompt already resident in
+# HBM" -- the phase prefills what it seeds. That is warming ahead of a request,
+# which is the thing this rung is defined by not doing.
+population = false
 
