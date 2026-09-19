@@ -199,6 +199,12 @@ def cmd_report(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     print(report.summary(run_dir / "results.csv"))
     report.write_summary(run_dir)
+    # Regenerated, not just rewritten: `by_question.csv` is a regroup of
+    # `requests.csv`, so a run recorded before a column existed grows it here
+    # without being re-run. That is how an old run gets its per-question TTFT.
+    written = report.write_by_question(run_dir)
+    if written is not None:
+        print(f"wrote {written}")
     return 0
 
 
