@@ -39,31 +39,50 @@
 # lookup to leave empty, and the phase is simply a prefill of every node's
 # system prompt, which is warming ahead of a request by another name.
 #
-# The three modes are a ladder, not a grid. Node eviction is on in all of them
-# -- it is the floor the other mechanisms are built on, and an arm without it
-# is a different build's question -- and each rung removes the layer above:
+# The modes are a ladder, not a grid: each rung removes exactly one switch from
+# the rung above it, which is what makes a difference between two of them
+# attributable to that switch.
 #
 #   full             prefetch + prompt seeds + filled prefixes + eviction
+#   no_seeds         full, minus the prompt seeds; prefixes still fill
 #   predictor_only   prefetch + eviction; ODR adds nothing on top
 #   no_prefetch      eviction alone; nothing is warmed ahead of a request,
 #                    including the population phase's own prefill
+#   none             the floor: both halves off, upstream LRU underneath
 #
-# So `full - predictor_only` is what open_deep_research contributes and
-# `predictor_only - no_prefetch` is what langgraph's predictor contributes,
-# with `baseline` as the fourth point below all three. That is three boots of
-# an eleven-hour batch rather than seven, which is the reason for the ladder:
-# every mode is a full re-run of the whole matrix.
+# Node eviction is on in every rung but the last. It is the floor the warming
+# mechanisms are built on, and switching it off takes the controller with it --
+# and the kv_hbm_ttft line, so there is nothing left to diff against. `none` is
+# below the ladder rather than on it for that reason: it is the build with
+# everything off, and its only job is the gap to `baseline`.
 #
-# `prompt_seeds` and `pseudo_dynamic` therefore move together, as one layer.
-# They are separable -- a mode setting one of them is two lines below, and
-# `pitlane arms` will list it -- and worth separating only once a result says
-# the layer matters, since each is another eleven hours.
+# So `full - no_seeds` and `no_seeds - predictor_only` are the two things
+# open_deep_research contributes, `predictor_only - no_prefetch` is what
+# langgraph's predictor contributes, `no_prefetch - none` is what the eviction
+# policy contributes, and `none - baseline` is what the build costs before any
+# of it -- which should be nothing, and is worth confirming once rather than
+# every batch. Every mode is a full re-run of the whole matrix, so five modes
+# is five eleven-hour batches; that is the reason this is a ladder and not the
+# seven-mode grid it replaced.
+#
+# `no_seeds` splits the middle step in two. `full - no_seeds` is what the prompt
+# seeds are worth on their own, and `no_seeds - predictor_only` is what filling
+# a prefix past its first manufactured segment is worth -- the two halves of
+# what `full - predictor_only` gives as one number. It is the rung to drop
+# first if the schedule will not take four.
 
 [full]
 description = "everything on: eviction, predictor, prompt seeds, filled prefixes"
 node_eviction = true
 prefetch = true
 prompt_seeds = true
+pseudo_dynamic = true
+
+[no_seeds]
+description = "full, minus the compress and final-report prompt seeds"
+node_eviction = true
+prefetch = true
+prompt_seeds = false
 pseudo_dynamic = true
 
 [predictor_only]
@@ -89,3 +108,11 @@ prefetch = false
 # which is the thing this rung is defined by not doing.
 population = false
 
+[none]
+description = "the floor on this build: both halves off, upstream LRU underneath"
+node_eviction = false
+prefetch = false
+# Skipped for the same reason as in `no_prefetch`, and more so: this arm exists
+# to be the floor, and a phase that prefills every node's system prompt into
+# HBM is not the floor.
+population = false

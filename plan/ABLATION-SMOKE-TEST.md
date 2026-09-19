@@ -48,12 +48,12 @@ Then the flag plumbing, which costs nothing and catches most mistakes:
 
 ```bash
 python3 tests/test_arm_flags.py     # expect: all arm-flag assertions passed
-pitlane arms                        # expect: 3 ours_* arms listed
+pitlane arms                        # expect: 5 ours_* arms listed
 ```
 
-`pitlane arms` must show exactly `ours_full ours_predictor_only
-ours_no_prefetch`. If any are missing, `pitlane/ablation.toml` did not load —
-stop and report.
+`pitlane arms` must show exactly `ours_full ours_no_seeds
+ours_predictor_only ours_no_prefetch ours_none`. If any are missing,
+`pitlane/ablation.toml` did not load — stop and report.
 
 Preflight the stack:
 
@@ -84,17 +84,17 @@ comparable.
 ## 2. Run the modes
 
 Every mode, one question, one run id. Roughly eight minutes of boot plus one
-question each — budget an hour for all three.
+question each — budget two hours for all five.
 
 ```bash
 export RUN_ID="ablation_smoke_$(date +%Y%m%d_%H%M%S)"
-ARMS="ours_full ours_predictor_only ours_no_prefetch" \
+ARMS="ours_full ours_no_seeds ours_predictor_only ours_no_prefetch ours_none" \
   RUN_ID="$RUN_ID" ./launch-batch.sh 1
 ```
 
-The three are a ladder — full, then prefetch and eviction alone, then eviction
-alone — so each one drops a layer the one before it had, and all three are
-needed to tell which layer a difference came from. Run them all.
+The five are a ladder — each drops exactly one switch from the one before it —
+so all five are needed to tell which switch a difference came from. Run them
+all.
 
 Each arm that exits non-zero is reported at the end and does not stop the
 others. Note which failed; a failed arm's checks below will be missing rather
@@ -112,7 +112,8 @@ Every arm's cell is `$CELL_ROOT/<arm>/batch1/rep1`. Run this once — it answers
 most of the table in one pass:
 
 ```bash
-for arm in ours_full ours_predictor_only ours_no_prefetch; do
+for arm in ours_full ours_no_seeds ours_predictor_only ours_no_prefetch \
+           ours_none; do
   c="$CELL_ROOT/$arm/batch1/rep1"
   [ -d "$c" ] || { printf '%-22s MISSING CELL\n' "$arm"; continue; }
   evict=$(grep -c "Node-aware KV eviction enabled" "$c"/*.log 2>/dev/null | paste -sd+ | bc)
@@ -131,18 +132,29 @@ Expected:
 | arm | evict_line | langgraph | population | seeds | blocked_prefixes |
 |---|---|---|---|---|---|
 | `ours_full` | ≥1 | >0 | >0 | >0 | 0 or few |
+| `ours_no_seeds` | ≥1 | >0 | >0 | **0** | 0 or few |
 | `ours_predictor_only` | ≥1 | >0 | >0 | **0** | **many** |
-| `ours_no_prefetch` | ≥1 | **0** | >0 | **0** | 0 |
+| `ours_no_prefetch` | ≥1 | **0** | **0** | **0** | 0 |
+| `ours_none` | **0** | **0** | **0** | **0** | 0 |
 
-`evict_line` is `≥1` in every row on purpose: eviction is the constant of this
-ladder, not one of its rungs. A **0** there is the eviction switch failing to
-reach the server, in an arm that never asked for it to be off.
+`ours_no_seeds` and `ours_predictor_only` differ in one column only —
+`blocked_prefixes`. Identical numbers across that pair mean the pseudo-dynamic
+switch never reached langgraph, which is the failure that row exists to catch.
+
+`ours_none` is the only row where `evict_line` is 0, and it is the only row
+allowed to be: it is the floor, below the ladder rather than on it.
+
+`evict_line` is `≥1` in every row but the last: eviction is on throughout the
+ladder and off only in the floor. A **0** anywhere above `ours_none` is the
+eviction switch failing to reach the server, in an arm that never asked for it
+to be off — and a **non**-zero in `ours_none` is the same failure the other way
+round.
 
 Read the columns as:
 
 - **`evict_line`** — the server logs `Node-aware KV eviction enabled` at boot.
-  All three modes run the policy, so absent anywhere is the switch not reaching
-  the server (check the tmux pane's `export` lines), never an intended off.
+  Every mode but `ours_none` runs the policy, so absent anywhere else is the
+  switch not reaching the server (check the tmux pane's `export` lines).
 - **`langgraph`** — prefetches issued by the live predictor. Zero with
   `prefetch=on` means the predictor is disabled, most likely a stale langgraph
   fork or an empty registry.
@@ -153,9 +165,9 @@ Read the columns as:
   prefetch a silent no-op — a zero there invalidates that whole run. With
   prefetch off there is no lookup to leave empty, and the phase would only
   prefill every node's system prompt into HBM, which is warming ahead of a
-  request and the one thing that rung is defined by not doing. So
-  `ours_no_prefetch` passes `--skip-system-prompt-population`, and a
-  **non**-zero there is the failure.
+  request and the one thing those rungs are defined by not doing. So
+  `ours_no_prefetch` and `ours_none` pass `--skip-system-prompt-population`,
+  and a **non**-zero in either is the failure.
 - **`seeds`** — rows in `prompt_seeds.jsonl`. `>0` needs both `prefetch` and
   `prompt_seeds` on. Note a one-question run may produce only a
   `final_report_seed` row: `compress_research_seed` fires only on a researcher
@@ -173,7 +185,7 @@ Read the columns as:
 
 **`ours_full` must reproduce `ours`.** If it does not, `arms.toml` and
 `ablation.toml` disagree and every other row is suspect. Run `ours` as a
-fourth arm into the same run id and compare token counts, which are
+sixth arm into the same run id and compare token counts, which are
 deterministic under pinned replay:
 
 ```bash

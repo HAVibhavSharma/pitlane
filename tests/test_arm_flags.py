@@ -217,20 +217,40 @@ def main() -> int:
         # A ladder of three, not a grid: eviction is on throughout and each
         # rung drops the layer above it, so `full - predictor_only` is what ODR
         # adds and `predictor_only - no_prefetch` is what the predictor adds.
-        check("three modes exist", len(registry.ablation_arms) == 3)
+        check("five modes exist", len(registry.ablation_arms) == 5)
         check("the ladder is in order",
-              registry.ablation_arms == ["ours_full", "ours_predictor_only",
-                                         "ours_no_prefetch"])
+              registry.ablation_arms == ["ours_full", "ours_no_seeds",
+                                         "ours_predictor_only",
+                                         "ours_no_prefetch", "ours_none"])
 
         expected = {
             "ours_full":            {"eviction": "1", "prefetch": "0", "seeds": "1", "pseudo": "1"},
+            "ours_no_seeds":        {"eviction": "1", "prefetch": "0", "seeds": "0", "pseudo": "1"},
             "ours_predictor_only":  {"eviction": "1", "prefetch": "0", "seeds": "0", "pseudo": "0"},
             "ours_no_prefetch":     {"eviction": "1", "prefetch": "1"},
+            "ours_none":            {"eviction": None, "prefetch": "1"},
         }
-        # Eviction is the constant, so no rung may turn it off -- an arm
-        # without it is a different build's question, not a step on this ladder.
+        # Each rung differs from the one above it in exactly one switch, which
+        # is what makes a difference between two of them attributable.
+        rungs = ["ours_full", "ours_no_seeds", "ours_predictor_only",
+                 "ours_no_prefetch", "ours_none"]
+        for upper, lower in zip(rungs, rungs[1:]):
+            differs = [k for k in ("eviction", "prefetch", "seeds", "pseudo")
+                       if expected[upper].get(k) != expected[lower].get(k)]
+            # `seeds` and `pseudo` stop being stated once prefetch goes off --
+            # the mode cannot set them and a guard rejects it if it tries -- so
+            # that step drops the two keys along with the switch it names.
+            named = [k for k in differs if k not in ("seeds", "pseudo")] or differs
+            check(f"{lower} differs from {upper} in one switch ({named})",
+                  len(named) == 1)
+        # Eviction is on in every rung but the floor: switching it off takes
+        # the controller with it, and the kv_hbm_ttft line with that, so an
+        # eviction-off arm has nothing left to diff against. `ours_none` is
+        # below the ladder rather than on it, and is the only mode allowed it.
         for name in registry.ablation_arms:
-            check(f"{name} keeps node eviction", switches(name)["eviction"] == "1")
+            want = None if name == "ours_none" else "1"
+            check(f"{name} node eviction is {want!r}",
+                  switches(name)["eviction"] == want)
 
         # The population phase is a switch only where it means something. With
         # prefetch on, an unseeded registry makes every lookup empty and every
@@ -239,9 +259,10 @@ def main() -> int:
         # prompt -- warming ahead of a request, which is what that rung is
         # defined by not doing.
         skip = "--skip-system-prompt-population"
-        check("no_prefetch skips the population phase",
-              skip in registry["ours_no_prefetch"].workflow_args)
-        for name in ("ours_full", "ours_predictor_only"):
+        for name in ("ours_no_prefetch", "ours_none"):
+            check(f"{name} skips the population phase",
+                  skip in registry[name].workflow_args)
+        for name in ("ours_full", "ours_no_seeds", "ours_predictor_only"):
             check(f"{name} still seeds the registry",
                   skip not in registry[name].workflow_args)
         check("the arm's own args survive the addition",

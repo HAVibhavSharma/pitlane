@@ -36,10 +36,16 @@ ids straight: a run produced by this script is a co-tenanted run, all of it.
 
 ## Running the ablation ladder on two cards
 
-The ladder is three arms, which is the shape this script already has:
+Each invocation runs three arms, two side by side and the third on whichever
+card frees first:
 
 ```bash
-PAIR="ours_full ours_predictor_only" THIRD=ours_no_prefetch ./launch-parallel.sh 50
+# first pass: the two ODR steps, with the predictor floor as the third
+PAIR="ours_full ours_no_seeds" THIRD=ours_predictor_only ./launch-parallel.sh 50
+
+# second pass, same run id so summary.md pivots all five together
+RUN_ID=<the id the first pass printed> PAIR="ours_no_prefetch ours_none" \
+  THIRD="" ./launch-parallel.sh 50
 ```
 
 Put the two arms whose **latency** difference you most want in the `PAIR`.
@@ -48,9 +54,11 @@ comparison is the fairest one this mode can produce; the `THIRD` runs with the
 box increasingly to itself and is flattered against both. Everything token-level
 — hit rates, prefetch accuracy, usefulness — is safe whichever way round they go.
 
-Read [05-ablation.md](05-ablation.md) first for what the three modes mean, and
-note that all three derive from `ours`, so unlike the default pairing every arm
-here starts an LMCache server and needs Redis.
+Read [05-ablation.md](05-ablation.md) first for what the modes mean, and note
+that they all derive from `ours`, so unlike the default pairing every arm here
+starts an LMCache server and needs Redis. The ladder is five arms now, which is
+two passes of this script rather than one — `PAIR` the two whose latency
+difference matters most in each.
 
 ## What makes the two stacks independent
 

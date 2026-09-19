@@ -6,6 +6,7 @@
 #   ./launch-parallel.sh            # 10 questions
 #   ./launch-parallel.sh 50
 #   PAIR="baseline continuum" THIRD=ours ./launch-parallel.sh 50
+#   PAIR="ours_no_prefetch ours_none" THIRD= ./launch-parallel.sh 50   # pair only
 #   RESUME=1 RUN_ID=batch50_20260917_101500 ./launch-parallel.sh 50
 #
 # READ THIS BEFORE USING IT FOR A PUBLISHED NUMBER.
@@ -34,7 +35,11 @@ cd "$(dirname "$0")"
 
 N="${1:-10}"
 PAIR="${PAIR:-baseline continuum}"
-THIRD="${THIRD:-ours}"
+# `${THIRD-ours}` and not `${THIRD:-ours}`: an explicitly empty THIRD means
+# "just the pair", which is how a five-arm ladder is run as two passes of this
+# script. `:-` would substitute the default for the empty string and silently
+# run `ours` as a third arm.
+THIRD="${THIRD-ours}"
 RESUME="${RESUME:-0}"
 RUN_ID="${RUN_ID:-batch${N}_$(date +%Y%m%d_%H%M%S)}"
 POLL_S="${POLL_S:-20}"
@@ -62,7 +67,11 @@ RESUME_FLAG=""
 
 echo "run id : $RUN_ID${RESUME_FLAG:+ (resuming)}"
 echo "pair   : $ARM_A on stack A, $ARM_B on stack B"
-echo "third  : $THIRD, on whichever stack finishes first"
+if [ -n "$THIRD" ]; then
+  echo "third  : $THIRD, on whichever stack finishes first"
+else
+  echo "third  : none (pair only)"
+fi
 echo "trace  : $TRACE"
 echo
 
@@ -104,17 +113,30 @@ status=0
 if [ "$free_stack" = A ]; then
   wait "$pid_a" || { echo "arm $ARM_A exited non-zero" >&2; status=1; }
   free_env="$STACK_A"; other_pid="$pid_b"; other_arm="$ARM_B"
-  echo "== $ARM_A done; starting $THIRD on stack A"
+  if [ -n "$THIRD" ]; then
+    echo "== $ARM_A done; starting $THIRD on stack A"
+  else
+    echo "== $ARM_A done; no third arm, waiting on $other_arm"
+  fi
 else
   wait "$pid_b" || { echo "arm $ARM_B exited non-zero" >&2; status=1; }
   free_env="$STACK_B"; other_pid="$pid_a"; other_arm="$ARM_A"
-  echo "== $ARM_B done; starting $THIRD on stack B"
+  if [ -n "$THIRD" ]; then
+    echo "== $ARM_B done; starting $THIRD on stack B"
+  else
+    echo "== $ARM_B done; no third arm, waiting on $other_arm"
+  fi
 fi
 
-run_arm "$THIRD" "$free_env" "launch-$THIRD" & pid_c=$!
+pid_c=""
+if [ -n "$THIRD" ]; then
+  run_arm "$THIRD" "$free_env" "launch-$THIRD" & pid_c=$!
+fi
 
 wait "$other_pid" || { echo "arm $other_arm exited non-zero" >&2; status=1; }
-wait "$pid_c" || { echo "arm $THIRD exited non-zero" >&2; status=1; }
+if [ -n "$pid_c" ]; then
+  wait "$pid_c" || { echo "arm $THIRD exited non-zero" >&2; status=1; }
+fi
 
 echo
 pitlane report "${BENCH_ROOT}/$RUN_ID"
